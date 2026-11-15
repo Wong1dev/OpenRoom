@@ -578,3 +578,234 @@ test.describe('Image generation – Pollinations (free, no key)', () => {
     expect(imageRequests[0]).toContain('/prompt/a%20starship%20at%20dawn?');
   });
 });
+
+test.describe('Shell – live wallpaper', () => {
+  for (const mobile of [false, true]) {
+    test(`the video toggle opens and closes the live wallpaper${mobile ? ' (phone)' : ''}`, async ({
+      browser,
+    }) => {
+      const context = await browser.newContext(
+        mobile ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } : {},
+      );
+      const page = await context.newPage();
+      // Keep the test offline: an empty video is enough to show the window
+      await page.route('https://cdn.openroom.ai/**/*.mp4', (route) =>
+        route.fulfill({ status: 200, contentType: 'video/mp4', body: '' }),
+      );
+      await page.goto('/');
+      const toggle = page.locator('[data-testid="wallpaper-toggle"]');
+      const pip = page.locator('[data-testid="video-pip"]');
+      await expect(toggle).toHaveAttribute('title', 'Live wallpaper: OFF');
+      await expect(pip).toHaveCount(0);
+
+      await toggle.click();
+      await expect(toggle).toHaveAttribute('title', 'Live wallpaper: ON');
+      await expect(pip).toBeVisible();
+      await expect(pip.locator('video')).toHaveAttribute('src', /\.mp4$/);
+      // The window opens fully on screen
+      const box = (await pip.boundingBox())!;
+      const size = page.viewportSize()!;
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(size.width);
+      expect(box.y + box.height).toBeLessThanOrEqual(size.height);
+
+      // Its own close button, and the toggle, both turn it off
+      await pip.locator('button[title="Close"]').click();
+      await expect(pip).toHaveCount(0);
+      await expect(toggle).toHaveAttribute('title', 'Live wallpaper: OFF');
+      await toggle.click();
+      await expect(pip).toBeVisible();
+      await toggle.click();
+      await expect(pip).toHaveCount(0);
+      await context.close();
+    });
+  }
+});
+
+/**
+ * Stand-in for the browser's speech recognition: the test decides what is
+ * "heard" via window.__speech.
+ */
+async function fakeSpeechRecognition(page: Page) {
+  await page.addInitScript(() => {
+    type Handler = ((e: unknown) => void) | null;
+    const w = window as unknown as Record<string, unknown>;
+    const speech = {
+      starts: 0,
+      lang: '',
+      active: null as null | {
+        onresult: Handler;
+        onerror: Handler;
+        onend: (() => void) | null;
+      },
+      hear(text: string) {
+        const results = [Object.assign([{ transcript: text }], { isFinal: false })];
+        speech.active?.onresult?.({ resultIndex: 0, results });
+      },
+      pause() {
+        const rec = speech.active;
+        speech.active = null;
+        rec?.onend?.();
+      },
+      fail(error: string) {
+        const rec = speech.active;
+        speech.active = null;
+        rec?.onerror?.({ error });
+        rec?.onend?.();
+      },
+    };
+    class FakeRecognition {
+      lang = '';
+      continuous = true;
+      interimResults = false;
+      maxAlternatives = 1;
+      onresult: Handler = null;
+      onerror: Handler = null;
+      onend: (() => void) | null = null;
+      start() {
+        speech.starts++;
+        speech.lang = this.lang;
+        speech.active = this;
+      }
+      stop() {
+        if (speech.active === this) speech.pause();
+      }
+      abort() {
+        if (speech.active === this) speech.fail('aborted');
+      }
+    }
+    w.__speech = speech;
+    for (const name of ['SpeechRecognition', 'webkitSpeechRecognition']) {
+      Object.defineProperty(window, name, { value: FakeRecognition, configurable: true });
+    }
+  });
+}
+
+type SpeechControl = {
+  starts: number;
+  lang: string;
+  hear(text: string): void;
+  pause(): void;
+  fail(error: string): void;
+};
+const speech = <T>(page: Page, fn: (s: SpeechControl) => T) =>
+  page.evaluate(
+    (src) =>
+      new Function('s', `return (${src})(s)`)(
+        (window as unknown as { __speech: SpeechControl }).__speech,
+      ),
+    fn.toString(),
+  ) as Promise<T>;
+
+test.describe('Chat panel – voice input', () => {
+  test('speaking a message fills the box while talking and sends it on a pause', async ({
+    page,
+  }) => {
+    await fakeSpeechRecognition(page);
+    await mockCharacterReply(page, '(laughs) I heard you loud and clear!', ['Nice']);
+    await page.goto('/');
+    const mic = page.locator('[data-testid="mic-btn"]');
+    const input = page.locator('[data-testid="chat-input"]');
+    await expect(mic).toBeVisible();
+    await expect(mic).toHaveAttribute('aria-pressed', 'false');
+
+    await mic.click();
+    await expect(mic).toHaveAttribute('aria-pressed', 'true');
+    await expect(input).toHaveAttribute('placeholder', 'Listening...');
+    expect(await speech(page, (s) => s.lang)).toBe('en-US');
+
+    await speech(page, (s) => s.hear('Can you hear'));
+    await expect(input).toHaveValue('Can you hear');
+    await speech(page, (s) => s.hear('Can you hear me'));
+    await expect(input).toHaveValue('Can you hear me');
+    await speech(page, (s) => s.pause());
+
+    await expect(mic).toHaveAttribute('aria-pressed', 'false');
+    const messages = page.locator('[data-testid="chat-message"]');
+    await expect(messages.filter({ hasText: 'Can you hear me' })).toHaveCount(1);
+    await expect(page.locator('[data-testid="chat-messages"]')).toContainText(
+      'I heard you loud and clear!',
+    );
+    await expect(input).toHaveValue('');
+    await expect(input).toHaveAttribute('placeholder', 'Type a message...');
+  });
+
+  test('tapping the mic again stops listening and sends what was heard', async ({ page }) => {
+    await fakeSpeechRecognition(page);
+    await mockCharacterReply(page, 'Got it.', []);
+    await page.goto('/');
+    const mic = page.locator('[data-testid="mic-btn"]');
+    await mic.click();
+    await speech(page, (s) => s.hear('open the music player'));
+    await mic.click();
+    await expect(mic).toHaveAttribute('aria-pressed', 'false');
+    await expect(
+      page.locator('[data-testid="chat-message"]').filter({ hasText: 'open the music player' }),
+    ).toHaveCount(1);
+    await expect(page.locator('[data-testid="chat-messages"]')).toContainText('Got it.');
+  });
+
+  test('explains when the microphone is refused or nothing was heard', async ({ page }) => {
+    await fakeSpeechRecognition(page);
+    await mockCharacterReply(page, 'unused', []);
+    await page.goto('/');
+    const mic = page.locator('[data-testid="mic-btn"]');
+    const note = page.locator('[data-testid="voice-note"]');
+    const messages = page.locator('[data-testid="chat-message"]');
+    await expect(messages.first()).toBeVisible();
+    const before = await messages.count();
+
+    await mic.click();
+    await speech(page, (s) => s.fail('not-allowed'));
+    await expect(note).toContainText('Microphone access was refused');
+    await expect(mic).toHaveAttribute('aria-pressed', 'false');
+
+    // Trying again hides the old note; silence gets its own hint and sends nothing
+    await mic.click();
+    await expect(note).toHaveCount(0);
+    await speech(page, (s) => s.fail('no-speech'));
+    await expect(note).toContainText("I didn't catch that");
+    expect(await speech(page, (s) => s.starts)).toBe(2);
+    await expect(messages).toHaveCount(before);
+  });
+
+  test('the mic button is hidden when the browser has no speech recognition', async ({ page }) => {
+    await page.addInitScript(() => {
+      delete (window as unknown as Record<string, unknown>).webkitSpeechRecognition;
+      delete (window as unknown as Record<string, unknown>).SpeechRecognition;
+    });
+    await mockLLM(page);
+    await page.goto('/');
+    await expect(page.locator('[data-testid="chat-input"]')).toBeVisible();
+    await expect(page.locator('[data-testid="mic-btn"]')).toHaveCount(0);
+  });
+
+  test.describe('on a phone', () => {
+    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+    test('the mic sits next to the input, uncovered, and works by tap', async ({ page }) => {
+      await fakeSpeechRecognition(page);
+      await mockCharacterReply(page, 'Hello from your phone!', []);
+      await page.goto('/');
+      const mic = page.locator('[data-testid="mic-btn"]');
+      const send = page.locator('[data-testid="send-btn"]');
+      const micBox = (await mic.boundingBox())!;
+      const sendBox = (await send.boundingBox())!;
+      expect(micBox.x + micBox.width).toBeLessThanOrEqual(sendBox.x);
+      // Nothing else is on top of the mic button
+      const hit = await page.evaluate(
+        ([x, y]) => document.elementFromPoint(x, y)?.closest('[data-testid="mic-btn"]') !== null,
+        [micBox.x + micBox.width / 2, micBox.y + micBox.height / 2],
+      );
+      expect(hit).toBe(true);
+
+      await mic.tap();
+      await speech(page, (s) => s.hear('hi there'));
+      await speech(page, (s) => s.pause());
+      await expect(page.locator('[data-testid="chat-messages"]')).toContainText(
+        'Hello from your phone!',
+      );
+    });
+  });
+});
