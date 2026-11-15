@@ -21,6 +21,7 @@ export default defineConfig({
         'src/lib/imageGenClient.ts',
         'src/lib/imageGenTools.ts',
         'src/lib/binaryFiles.ts',
+        'src/lib/speechInput.ts',
         'src/pages/Dreamland/{utils,store,actions,repositories,services}/**/*.ts',
       ],
       thresholds: {

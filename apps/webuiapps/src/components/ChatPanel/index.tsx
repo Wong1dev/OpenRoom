@@ -11,6 +11,7 @@ import {
   List,
   Volume2,
   VolumeX,
+  Mic,
 } from 'lucide-react';
 import { chat, loadConfig, loadConfigSync, saveConfig, type ChatMessage } from '@/lib/llmClient';
 import {
@@ -68,6 +69,12 @@ import {
   primeSpeech,
 } from '@/lib/tts';
 import {
+  createSpeechInput,
+  isSpeechInputSupported,
+  type SpeechInput,
+  type SpeechInputError,
+} from '@/lib/speechInput';
+import {
   getImageGenToolDefinitions,
   buildImageGenPrompt,
   isImageGenTool,
@@ -115,6 +122,18 @@ interface CharacterDisplayMessage extends DisplayMessage {
   suggestedReplies?: string[];
   toolCalls?: string[]; // collapsed tool call summaries
 }
+
+/** What to tell the user when voice input fails. */
+const VOICE_INPUT_MESSAGES: Record<SpeechInputError, string> = {
+  denied:
+    'Microphone access was refused. Allow the microphone and speech recognition for this site in your browser settings.',
+  insecure: 'Voice input needs a secure connection: open OpenRoom with an https:// address.',
+  'no-speech': "I didn't catch that. Tap the microphone and try again.",
+  'no-mic': 'No microphone was found.',
+  network: "Speech recognition couldn't reach its service. Check your connection.",
+  unsupported: "This browser doesn't support voice input. Try Safari or Chrome.",
+  other: 'Voice input stopped unexpectedly. Try again.',
+};
 
 function hasUsableLLMConfig(config: LLMConfig | null | undefined): config is LLMConfig {
   return !!config?.baseUrl.trim() && !!config.model.trim();
@@ -1087,6 +1106,48 @@ const ChatPanel: React.FC<{
     }
   };
 
+  // ---- Voice input: tap the mic, speak, and the message sends when you pause ----
+  const [speechInputSupported] = useState(isSpeechInputSupported);
+  const [listening, setListening] = useState(false);
+  const [voiceNote, setVoiceNote] = useState<string | null>(null);
+  const speechInputRef = useRef<SpeechInput | null>(null);
+  const handleSendRef = useRef(handleSend);
+  handleSendRef.current = handleSend;
+
+  useEffect(() => () => speechInputRef.current?.abort(), []);
+
+  useEffect(() => {
+    if (!voiceNote) return;
+    const timer = setTimeout(() => setVoiceNote(null), 6000);
+    return () => clearTimeout(timer);
+  }, [voiceNote]);
+
+  const toggleListening = useCallback(() => {
+    if (speechInputRef.current?.isListening()) {
+      speechInputRef.current.stop();
+      return;
+    }
+    // Don't let the microphone hear the character's own voice
+    stopSpeaking();
+    if (!speechInputRef.current) {
+      speechInputRef.current = createSpeechInput({
+        onInterim: (text) => setInput(text),
+        onFinal: (text) => {
+          setInput('');
+          void handleSendRef.current(text);
+        },
+        onError: (error) => {
+          if (error === 'no-speech') setInput('');
+          setVoiceNote(VOICE_INPUT_MESSAGES[error]);
+        },
+        onEnd: () => setListening(false),
+      });
+    }
+    setVoiceNote(null);
+    setListening(true);
+    speechInputRef.current.start();
+  }, []);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -1233,6 +1294,11 @@ const ChatPanel: React.FC<{
             </div>
           )}
 
+          {voiceNote && (
+            <div className={styles.voiceNote} role="status" data-testid="voice-note">
+              {voiceNote}
+            </div>
+          )}
           <div className={styles.inputArea}>
             <textarea
               ref={inputRef}
@@ -1241,7 +1307,7 @@ const ChatPanel: React.FC<{
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Type a message..."
+              placeholder={listening ? 'Listening...' : 'Type a message...'}
               rows={1}
               // readOnly (not disabled) so focus isn't stolen while waiting for a reply:
               // desktop keeps typing focus; on touch devices handleKeyDown blurs explicitly
@@ -1249,6 +1315,20 @@ const ChatPanel: React.FC<{
               aria-busy={loading}
               data-testid="chat-input"
             />
+            {speechInputSupported && (
+              <button
+                type="button"
+                className={`${styles.micBtn} ${listening ? styles.micListening : ''}`}
+                onClick={toggleListening}
+                disabled={loading && !listening}
+                title={listening ? 'Listening... tap to stop' : 'Speak your message'}
+                aria-label={listening ? 'Stop listening' : 'Speak your message'}
+                aria-pressed={listening}
+                data-testid="mic-btn"
+              >
+                <Mic size={18} />
+              </button>
+            )}
             <button
               className={styles.sendBtn}
               onClick={() => handleSend()}

@@ -518,7 +518,7 @@ const Shell: React.FC = () => {
         <Plus size={20} />
       </button>
 
-      <div className={`${styles.bottomBar} ${chatOpen ? styles.chatOpen : ''}`}>
+      <div ref={barRef} className={`${styles.bottomBar} ${chatOpen ? styles.chatOpen : ''}`}>
         <button
           className={`${styles.barBtn} ${liveWallpaper ? styles.liveOn : styles.liveOff}`}
           onClick={() => setLiveWallpaper((prev) => !prev)}
