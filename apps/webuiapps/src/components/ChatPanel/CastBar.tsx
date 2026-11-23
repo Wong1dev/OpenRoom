@@ -58,7 +58,7 @@ const CastBar: React.FC<{
             <span className={styles.castAvatar}>
               {img ? <img src={img} alt="" /> : member.name.charAt(0)}
             </span>
-            <span className={styles.castName}>{member.name.split(' ')[0]}</span>
+            <span className={styles.castName}>{member.name}</span>
           </button>
         );
       })}

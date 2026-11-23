@@ -454,11 +454,18 @@ const CharacterAvatar: React.FC<{
     });
   }, [media?.url, activeUrl]);
 
+  // The media that should be showing now. A superseded layer that finishes loading
+  // late (e.g. the startup character's CDN video) must not take over again.
+  const wantedUrlRef = useRef(media?.url);
+  wantedUrlRef.current = media?.url;
+
   const handleMediaReady = useCallback((readyUrl: string) => {
+    if (readyUrl !== wantedUrlRef.current) return;
     setLayers((prev) => {
       const staleUrls = prev.filter((l) => l.url !== readyUrl).map((l) => l.url);
       setTimeout(() => {
-        setLayers((curr) => curr.filter((l) => !staleUrls.includes(l.url)));
+        // Never remove the layer that is showing.
+        setLayers((curr) => curr.filter((l) => l.active || !staleUrls.includes(l.url)));
       }, 300);
       return prev.map((l) => ({ ...l, active: l.url === readyUrl }));
     });

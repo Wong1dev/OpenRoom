@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
 
 /**
@@ -114,5 +116,55 @@ test.describe('Character switch on startup keeps chat histories apart', () => {
     });
     await page.goto('/');
     await expectKestrelClean(page, saves);
+  });
+});
+
+test.describe('Avatar on a startup character switch', () => {
+  test("a late-loading video of the previous character doesn't replace the new one", async ({
+    page,
+  }) => {
+    const webm = readFileSync(join(__dirname, 'fixtures', 'avatar.webm'));
+    const withVideos = {
+      ...collection,
+      items: {
+        ...collection.items,
+        kestrel: {
+          ...collection.items.kestrel,
+          character_meta_info: { emotion_videos: { default: ['/test-avatar/kestrel.webm'] } },
+        },
+      },
+    };
+    // Aoi's built-in CDN video (shown first) only finishes loading just after
+    // Kestrel's video is ready, when it is no longer the one that should show.
+    let kestrelServed: () => void = () => {};
+    const kestrelReady = new Promise<void>((r) => (kestrelServed = r));
+    await page.route('https://cdn.openroom.ai/**', async (route) => {
+      await kestrelReady;
+      await delay(150);
+      return route.fulfill({ status: 200, contentType: 'video/webm', body: webm });
+    });
+    await page.route('**/test-avatar/**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'video/webm', body: webm });
+      kestrelServed();
+    });
+    await page.route('**/api/characters', async (route) => {
+      await delay(300);
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(withVideos),
+      });
+    });
+    await page.route('**/api/session-data**', (route) =>
+      route.fulfill({ status: 404, contentType: 'application/json', body: '{}' }),
+    );
+    await page.goto('/');
+
+    const kestrelVideo = page.locator('video[src*="kestrel.webm"]');
+    await expect(kestrelVideo).toHaveCSS('opacity', '1');
+    // After Aoi's video has loaded too, Kestrel is still the one shown.
+    await page.waitForTimeout(2500);
+    await expect(kestrelVideo).toHaveCSS('opacity', '1');
+    await expect(page.locator('video')).toHaveCount(1);
   });
 });
