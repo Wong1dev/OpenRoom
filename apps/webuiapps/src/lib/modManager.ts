@@ -5,6 +5,18 @@
  * Persisted to ~/.openroom/mods.json via dev-server API.
  */
 
+import {
+  type CastMember,
+  type CastStateFields,
+  type CastUpdate,
+  applyCastUpdate,
+  buildCastPrompt,
+  findCastMember,
+  getSpeakerId,
+  logPlotChoice,
+  setSpeakerState,
+} from './storyCast';
+
 // ---------------------------------------------------------------------------
 // Types (aligned with chat-agent mod.yaml / mod_manager.py)
 // ---------------------------------------------------------------------------
@@ -36,9 +48,13 @@ export interface ModConfig {
   prologue?: string;
   /** Suggested opening replies for the user */
   opening_rec_replies?: Array<{ reply_text: string }>;
+  /** Characters in this story; the speaker can switch between them (see storyCast.ts) */
+  cast?: CastMember[];
+  /** Cast id of the story's lead (defaults to the first cast member) */
+  lead_id?: string;
 }
 
-export interface ModState {
+export interface ModState extends CastStateFields {
   current_stage_index: number;
   total_stage_count: number;
   is_finished: boolean;
@@ -401,6 +417,53 @@ export class ModManager {
     return { ...this.state };
   }
 
+  // --- Cast ---
+
+  get cast(): CastMember[] {
+    return this.config.cast ?? [];
+  }
+
+  get hasCast(): boolean {
+    return this.cast.length > 0;
+  }
+
+  get speakerId(): string | null {
+    return this.hasCast ? getSpeakerId(this.cast, this.state, this.config.lead_id) : null;
+  }
+
+  get speaker(): CastMember | null {
+    const id = this.speakerId;
+    return id ? (findCastMember(this.cast, id) ?? null) : null;
+  }
+
+  /** Make a cast member the speaker. Returns false if they are not in the cast. */
+  setSpeaker(id: string): boolean {
+    if (!findCastMember(this.cast, id)) return false;
+    this.state = setSpeakerState(this.state, id);
+    return true;
+  }
+
+  /** Update a cast member's memory. Returns a result message for the model. */
+  updateCast(update: CastUpdate): string {
+    if (!findCastMember(this.cast, update.cast_id)) {
+      return `error: unknown cast_id "${update.cast_id}"`;
+    }
+    this.state = applyCastUpdate(this.state, update);
+    return 'success';
+  }
+
+  /** Record a key player choice. Returns a result message for the model. */
+  recordChoice(summary: string): string {
+    if (!summary.trim()) return 'error: empty summary';
+    this.state = logPlotChoice(this.state, summary);
+    return 'success';
+  }
+
+  /** Replace the config (e.g. after a stage was revised), keeping the state. */
+  setConfig(config: ModConfig): void {
+    this.config = config;
+  }
+
   getConfig(): ModConfig {
     return this.config;
   }
@@ -503,12 +566,16 @@ export class ModManager {
   // --- Stage reminder for system prompt ---
 
   buildStageReminder(): string {
+    const cast = this.hasCast ? buildCastPrompt(this.cast, this.state, this.config.lead_id) : '';
     if (this.state.is_finished) {
-      return `[Story Complete] All stages of "${this.config.mod_name_en}" have been completed. You are now in free conversation mode.\n`;
+      return (
+        `[Story Complete] All stages of "${this.config.mod_name_en}" have been completed. You are now in free conversation mode.\n` +
+        cast
+      );
     }
 
     const stage = this.currentStage;
-    if (!stage) return '';
+    if (!stage) return cast;
 
     return (
       `[Story Progress] Mod: "${this.config.mod_name_en}" — Stage ${stage.stage_index + 1}/${this.config.stage_count}: ${stage.stage_name}\n` +
@@ -517,7 +584,8 @@ export class ModManager {
       `${this.getCurrentTargetsDescription()}\n\n` +
       `IMPORTANT: When you determine a target has been achieved through the conversation, ` +
       `call the finish_target tool with the target_id(s). Do NOT announce target completion ` +
-      `to the user — just naturally continue the conversation.\n`
+      `to the user — just naturally continue the conversation.\n` +
+      cast
     );
   }
 

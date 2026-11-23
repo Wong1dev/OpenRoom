@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Plus, Trash2, RotateCcw, Check } from 'lucide-react';
+import { X, Plus, Trash2, RotateCcw, Check, Sparkles } from 'lucide-react';
 import {
   type ModConfig,
   type ModState,
@@ -9,7 +9,12 @@ import {
   ModManager,
   generateModId,
   getModList,
+  addMod,
+  setActiveMod,
 } from '@/lib/modManager';
+import type { CharacterConfig } from '@/lib/characterManager';
+import type { LLMConfig } from '@/lib/llmModels';
+import StoryGenerator from './StoryGenerator';
 import styles from './panel.module.scss';
 
 interface ModPanelProps {
@@ -17,11 +22,24 @@ interface ModPanelProps {
   onSave: (collection: ModCollection) => void;
   onClose: () => void;
   initialEditId?: string;
+  /** For "Write a new story" */
+  characters?: CharacterConfig[];
+  activeCharacterId?: string;
+  llmConfig?: LLMConfig | null;
 }
 
-const ModPanel: React.FC<ModPanelProps> = ({ collection, onSave, onClose, initialEditId }) => {
+const ModPanel: React.FC<ModPanelProps> = ({
+  collection,
+  onSave,
+  onClose,
+  initialEditId,
+  characters = [],
+  activeCharacterId = '',
+  llmConfig = null,
+}) => {
   const [col, setCol] = useState<ModCollection>(() => ({ ...collection }));
   const [editingId, setEditingId] = useState<string | null>(initialEditId ?? null);
+  const [writing, setWriting] = useState(false);
 
   const mods = getModList(col);
   const activeId = col.activeId;
@@ -70,6 +88,22 @@ const ModPanel: React.FC<ModPanelProps> = ({ collection, onSave, onClose, initia
   const handleSave = () => {
     onSave(col);
   };
+
+  if (writing) {
+    return (
+      <StoryGenerator
+        characters={characters}
+        activeCharacterId={activeCharacterId}
+        stories={mods}
+        llmConfig={llmConfig}
+        onCreate={(config) => {
+          // Add the new story, make it active and start it right away.
+          onSave(setActiveMod(addMod(col, config), config.id));
+        }}
+        onClose={() => setWriting(false)}
+      />
+    );
+  }
 
   if (editingEntry) {
     return (
@@ -170,6 +204,15 @@ const ModPanel: React.FC<ModPanelProps> = ({ collection, onSave, onClose, initia
           <button className={styles.addBtn} onClick={handleAdd}>
             <Plus size={14} /> New Mod
           </button>
+          {characters.length > 0 && (
+            <button
+              className={styles.addBtn}
+              onClick={() => setWriting(true)}
+              data-testid="write-story"
+            >
+              <Sparkles size={14} /> Write a new story
+            </button>
+          )}
           <div style={{ flex: 1 }} />
           <button className={styles.cancelBtn} onClick={onClose}>
             Cancel
@@ -207,6 +250,7 @@ function configToEditable(config: ModConfig): EditableStage[] {
 }
 
 function editableToConfig(
+  base: ModConfig,
   stages: EditableStage[],
   id: string,
   modName: string,
@@ -226,7 +270,9 @@ function editableToConfig(
       stage_targets: targetsMap,
     };
   });
+  // Keep fields the editor does not show (prologue, icon, cast, ...).
   return {
+    ...base,
     id,
     mod_name: modName,
     mod_name_en: modNameEn,
@@ -293,12 +339,26 @@ const ModEditor: React.FC<{
   };
 
   const handleSave = () => {
-    const newConfig = editableToConfig(stages, config.id, modName, modNameEn, modDescription);
+    const newConfig = editableToConfig(
+      config,
+      stages,
+      config.id,
+      modName,
+      modNameEn,
+      modDescription,
+    );
     onSave({ config: newConfig, state: currentState });
   };
 
   const handleSaveAndReset = () => {
-    const newConfig = editableToConfig(stages, config.id, modName, modNameEn, modDescription);
+    const newConfig = editableToConfig(
+      config,
+      stages,
+      config.id,
+      modName,
+      modNameEn,
+      modDescription,
+    );
     onSave({
       config: newConfig,
       state: {

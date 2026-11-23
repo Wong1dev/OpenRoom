@@ -80,6 +80,7 @@ import {
   buildImageGenPrompt,
   isImageGenTool,
   executeImageGenTool,
+  generateImageFile,
 } from '@/lib/imageGenTools';
 import {
   loadChatHistory,
@@ -87,6 +88,7 @@ import {
   saveChatHistory,
   clearChatHistory,
   buildSessionPath,
+  buildStorySessionPath,
   type DisplayMessage,
 } from '@/lib/chatHistoryStorage';
 import {
@@ -104,13 +106,17 @@ import {
 import {
   ModManager,
   type ModCollection,
+  type ModConfig,
   DEFAULT_MOD_COLLECTION,
   loadModCollection,
   loadModCollectionSync,
   saveModCollection,
   getActiveModEntry,
 } from '@/lib/modManager';
+import { castMemberToCharacter } from '@/lib/storyCast';
+import { reviseNextStage } from '@/lib/storyGenerator';
 import CharacterPanel from './CharacterPanel';
+import CastBar from './CastBar';
 import ModPanel from './ModPanel';
 import styles from './index.module.scss';
 
@@ -120,6 +126,8 @@ import styles from './index.module.scss';
 
 interface CharacterDisplayMessage extends DisplayMessage {
   emotion?: string;
+  /** Who said it, in stories with a cast */
+  speakerName?: string;
   suggestedReplies?: string[];
   toolCalls?: string[]; // collapsed tool call summaries
 }
@@ -206,6 +214,83 @@ function getFinishTargetToolDef() {
       },
     },
   };
+}
+
+function getCastToolDefs() {
+  return [
+    {
+      type: 'function' as const,
+      function: {
+        name: 'switch_speaker',
+        description:
+          'Hand the conversation to another cast member of the story. They answer the user next ' +
+          '(with respond_to_user). Use it when the scene calls for someone else to talk.',
+        parameters: {
+          type: 'object' as const,
+          properties: {
+            cast_id: { type: 'string', description: 'Cast id of the member who takes over' },
+            reason: { type: 'string', description: 'Why they take over (one line)' },
+          },
+          required: ['cast_id'],
+        },
+      },
+    },
+    {
+      type: 'function' as const,
+      function: {
+        name: 'update_cast',
+        description:
+          "Record a change in a cast member's memory: they appeared, their feelings about the user " +
+          'changed, they learned something, or something notable happened to them. Silent.',
+        parameters: {
+          type: 'object' as const,
+          properties: {
+            cast_id: { type: 'string', description: 'Cast id' },
+            attitude: {
+              type: 'string',
+              description: 'How they now feel about the user, in a few words',
+            },
+            learned: { type: 'string', description: 'Something they now know' },
+            note: { type: 'string', description: 'Something notable they did or that happened' },
+          },
+          required: ['cast_id'],
+        },
+      },
+    },
+    {
+      type: 'function' as const,
+      function: {
+        name: 'record_choice',
+        description:
+          'Record a decision by the user that matters for the plot (one line). The rest of the story follows it. Silent.',
+        parameters: {
+          type: 'object' as const,
+          properties: {
+            summary: {
+              type: 'string',
+              description: 'The choice, e.g. "Told Pell the truth about the card"',
+            },
+          },
+          required: ['summary'],
+        },
+      },
+    },
+  ];
+}
+
+/** The character to speak and show as: the story's current speaker, or the active character. */
+function resolveSpeaker(
+  mm: ModManager | null,
+  characters: Record<string, CharacterConfig>,
+  fallback: CharacterConfig,
+): CharacterConfig {
+  const member = mm?.speaker;
+  return member ? castMemberToCharacter(member, characters) : fallback;
+}
+
+/** Remove a "[Name]" prefix the model may copy from the history format. */
+function stripSpeakerPrefix(text: string): string {
+  return text.replace(/^\s*\[[^\]\n]{1,40}\]\s*/, '');
 }
 
 // ---------------------------------------------------------------------------
@@ -448,8 +533,13 @@ const ChatPanel: React.FC<{
     return new ModManager(entry.config, entry.state);
   });
 
-  // Session key for chat history isolation (character × mod)
-  const sessionPath = buildSessionPath(charCollection.activeId, modCollection.activeId);
+  // Session key for chat history isolation (character × mod). A story with a cast
+  // keeps one shared timeline, whichever cast member the user is talking to.
+  const isCastStory = !!modManager?.hasCast;
+  const sessionPath = isCastStory
+    ? buildStorySessionPath(modCollection.activeId)
+    : buildSessionPath(charCollection.activeId, modCollection.activeId);
+  const speakerCharacter = resolveSpeaker(modManager, charCollection.items, character);
   setSessionPath(sessionPath);
 
   // Chat state — initialized from session-scoped cache
@@ -563,18 +653,27 @@ const ChatPanel: React.FC<{
     };
   }, [messages, chatHistory, suggestedReplies, sessionGuard]);
 
+  // Read through a ref: the history must not be reloaded each time the mod's state is saved
+  // (e.g. after finish_target), which would replace the newest messages with the saved copy.
+  const modCollectionRef = useRef(modCollection);
+  modCollectionRef.current = modCollection;
+
   /** Seed prologue and opening replies from active mod */
   const seedPrologue = useCallback(() => {
-    const entry = getActiveModEntry(modCollection);
+    const entry = getActiveModEntry(modCollectionRef.current);
     const prologue = entry.config.prologue;
     if (prologue) {
+      const lead = new ModManager(entry.config, entry.state).speaker;
       const prologueMsg: CharacterDisplayMessage = {
         id: 'prologue',
         role: 'assistant',
         content: prologue,
+        speakerName: lead?.name,
       };
       setMessages([prologueMsg]);
-      setChatHistory([{ role: 'assistant', content: prologue }]);
+      setChatHistory([
+        { role: 'assistant', content: lead ? `[${lead.name}] ${prologue}` : prologue },
+      ]);
     } else {
       setMessages([]);
       setChatHistory([]);
@@ -582,7 +681,7 @@ const ChatPanel: React.FC<{
     const openingReplies = entry.config.opening_rec_replies;
     setSuggestedReplies(openingReplies?.length ? openingReplies.map((r) => r.reply_text) : []);
     setCurrentEmotion(undefined);
-  }, [modCollection]);
+  }, []);
 
   // Reload chat history when session (character × mod) changes
   useEffect(() => {
@@ -604,7 +703,7 @@ const ChatPanel: React.FC<{
         } else {
           const onlyPrologue = loadedMessages.length === 1 && loadedMessages[0].id === 'prologue';
           if (onlyPrologue) {
-            const entry = getActiveModEntry(modCollection);
+            const entry = getActiveModEntry(modCollectionRef.current);
             const openingReplies = entry.config.opening_rec_replies;
             setSuggestedReplies(
               openingReplies?.length ? openingReplies.map((r) => r.reply_text) : [],
@@ -620,7 +719,7 @@ const ChatPanel: React.FC<{
     loadMemories(sessionPath).then((loaded) => {
       if (sessionGuard.isCurrent(sessionPath)) setMemories(loaded);
     });
-  }, [sessionPath, modCollection, seedPrologue, sessionGuard]);
+  }, [sessionPath, seedPrologue, sessionGuard]);
 
   // Load configs from file (async override).
   // Empty deps [] is intentional: configs (character collection, mod collection,
@@ -729,6 +828,81 @@ const ChatPanel: React.FC<{
   modManagerRef.current = modManager;
   const characterRef = useRef(character);
   characterRef.current = character;
+  const charCollectionRef = useRef(charCollection);
+  charCollectionRef.current = charCollection;
+
+  /**
+   * Save a mod manager's state (tools only change state). The config is taken from
+   * the collection, so a stage revised in the background is not overwritten.
+   */
+  const persistModState = useCallback((mm: ModManager, revisedConfig?: ModConfig) => {
+    const id = mm.getConfig().id;
+    const prev = modCollectionRef.current;
+    const cfg = revisedConfig ?? prev.items[id]?.config ?? mm.getConfig();
+    // A config change keeps the latest saved state; a state change keeps the latest config.
+    const state = revisedConfig ? (prev.items[id]?.state ?? mm.getState()) : mm.getState();
+    const updated: ModCollection = {
+      ...prev,
+      items: { ...prev.items, [id]: { config: cfg, state } },
+    };
+    modCollectionRef.current = updated;
+    setModCollection(updated);
+    void saveModCollection(updated);
+    setModManager(new ModManager(cfg, state));
+  }, []);
+
+  // Paint portraits for story-only cast members: once each, in the background,
+  // only when image generation is set up. Failures leave the letter placeholder.
+  const portraitAttemptsRef = useRef(new Set<string>());
+  useEffect(() => {
+    const mm = modManager;
+    if (!mm?.hasCast || !isImageGenConfigured(imageGenConfig)) return;
+    const modId = mm.getConfig().id;
+    const todo = mm.cast.filter(
+      (m) =>
+        !m.character_id &&
+        !m.portrait_url &&
+        m.portrait_prompt &&
+        !portraitAttemptsRef.current.has(`${modId}:${m.id}`),
+    );
+    if (todo.length === 0) return;
+    todo.forEach((m) => portraitAttemptsRef.current.add(`${modId}:${m.id}`));
+    void (async () => {
+      for (const member of todo) {
+        try {
+          const image = await generateImageFile(
+            `${member.portrait_prompt}, head and shoulders portrait, facing the viewer, soft light, plain dark background`,
+            `story/portraits/${member.id}-${Date.now()}`,
+          );
+          const live = modManagerRef.current;
+          if (!live || live.getConfig().id !== modId) return;
+          const cfg = modCollectionRef.current.items[modId]?.config ?? live.getConfig();
+          persistModState(live, {
+            ...cfg,
+            cast: (cfg.cast ?? []).map((c) =>
+              c.id === member.id ? { ...c, portrait_url: image.url } : c,
+            ),
+          });
+        } catch (err) {
+          logger.warn('ChatPanel', 'Portrait generation failed for', member.id, err);
+        }
+      }
+    })();
+  }, [modManager, imageGenConfig, persistModState]);
+
+  /** The user picks who to talk to. */
+  const handleSelectSpeaker = useCallback(
+    (castId: string) => {
+      const mm = modManagerRef.current;
+      if (!mm || mm.speakerId === castId) return;
+      if (!mm.setSpeaker(castId)) return;
+      persistModState(mm);
+      const who = mm.speaker?.name ?? castId;
+      addMessage({ id: `${Date.now()}-turn`, role: 'tool', content: `You turn to ${who}.` });
+      setCurrentEmotion(undefined);
+    },
+    [persistModState, addMessage],
+  );
   const memoriesRef = useRef(memories);
   memoriesRef.current = memories;
 
@@ -839,11 +1013,15 @@ const ChatPanel: React.FC<{
     await loadActionsFromMeta();
     const hasImageGen = isImageGenConfigured(imageGenConfigRef.current);
     const mm = modManagerRef.current;
-    const char = characterRef.current;
+    const hasCast = !!mm?.hasCast;
+    const speakerNow = () =>
+      resolveSpeaker(mm, charCollectionRef.current.items, characterRef.current);
+    const char = speakerNow();
 
     const tools = [
       getRespondToUserToolDef(),
       getFinishTargetToolDef(),
+      ...(hasCast ? getCastToolDefs() : []),
       getListAppsToolDefinition(),
       getAppActionToolDefinition(),
       ...getFileToolDefinitions(),
@@ -909,8 +1087,10 @@ const ChatPanel: React.FC<{
             (params.character_expression as { content?: string; emotion?: string }) ?? {};
           const interaction = (params.user_interaction as { suggested_replies?: string[] }) ?? {};
 
-          const content = replaceNamePlaceholders(expr.content ?? '');
+          const raw = replaceNamePlaceholders(expr.content ?? '');
+          const content = hasCast ? stripSpeakerPrefix(raw) : raw;
           const emotion = expr.emotion;
+          const speaking = speakerNow();
           const replies = sanitizeSuggestedReplies(interaction.suggested_replies ?? []);
           if (ttsEnabledRef.current) void speak(content);
           deliveredReply = true;
@@ -920,18 +1100,20 @@ const ChatPanel: React.FC<{
             role: 'assistant',
             content,
             emotion,
+            speakerName: hasCast ? speaking.character_name : undefined,
             suggestedReplies: replies,
             toolCalls:
               pendingToolCallsRef.current.length > 0 ? [...pendingToolCallsRef.current] : undefined,
           });
           setSuggestedReplies(replies);
           if (emotion) {
-            clearEmotionVideoCache(character.id);
+            clearEmotionVideoCache(speaking.id);
             setCurrentEmotion(emotion);
           }
           pendingToolCallsRef.current = [];
 
-          setChatHistory((prev) => [...prev, { role: 'assistant', content }]);
+          const historyText = hasCast ? `[${speaking.character_name}] ${content}` : content;
+          setChatHistory((prev) => [...prev, { role: 'assistant', content: historyText }]);
           currentMessages = [
             ...currentMessages,
             { role: 'tool', content: 'Message delivered.', tool_call_id: tc.id },
@@ -944,17 +1126,18 @@ const ChatPanel: React.FC<{
           const targetIds = (params.target_ids as number[]) ?? [];
           if (mm) {
             const result = mm.finishTarget(targetIds);
-            // Persist state via collection
-            const updatedEntry = { config: mm.getConfig(), state: mm.getState() };
-            setModCollection((prev) => {
-              const updated = {
-                ...prev,
-                items: { ...prev.items, [updatedEntry.config.id]: updatedEntry },
-              };
-              saveModCollection(updated);
-              return updated;
-            });
-            setModManager(new ModManager(mm.getConfig(), mm.getState()));
+            persistModState(mm);
+            if (result.stageCompleted && hasCast && !mm.isFinished) {
+              // Adapt the stage just reached to the player's choices (in the background).
+              const reached = mm.getState();
+              void reviseNextStage(mm.getConfig(), reached, cfg).then((revised) => {
+                const live = modManagerRef.current;
+                if (!revised || !live) return;
+                if (live.getConfig().id !== revised.id) return;
+                if (live.currentStageIndex !== reached.current_stage_index) return;
+                persistModState(live, revised);
+              });
+            }
 
             currentMessages = [
               ...currentMessages,
@@ -966,6 +1149,57 @@ const ChatPanel: React.FC<{
               { role: 'tool', content: 'No mod loaded.', tool_call_id: tc.id },
             ];
           }
+          continue;
+        }
+
+        // ---- Cast tools ----
+        if (tc.function.name === 'switch_speaker') {
+          const castId = String(params.cast_id ?? '');
+          let result: string;
+          if (!mm?.hasCast) {
+            result = 'error: this story has no cast';
+          } else if (!mm.setSpeaker(castId)) {
+            result = `error: unknown cast_id "${castId}". Cast ids: ${mm.cast.map((m) => m.id).join(', ')}`;
+          } else {
+            persistModState(mm);
+            const next = speakerNow();
+            pendingToolCallsRef.current.push(`switch_speaker(${castId})`);
+            // The rest of this turn is played by the new speaker.
+            currentMessages = [
+              {
+                role: 'system',
+                content: buildSystemPrompt(next, mm, hasImageGen, memoriesRef.current),
+              },
+              ...currentMessages.slice(1),
+            ];
+            deliveredReply = false;
+            setCurrentEmotion(undefined);
+            result = `success: you are now ${next.character_name}. Continue the scene as ${next.character_name} and answer the user with respond_to_user.`;
+          }
+          currentMessages = [
+            ...currentMessages,
+            { role: 'tool', content: result, tool_call_id: tc.id },
+          ];
+          continue;
+        }
+        if (tc.function.name === 'update_cast' || tc.function.name === 'record_choice') {
+          let result = 'error: this story has no cast';
+          if (mm?.hasCast) {
+            result =
+              tc.function.name === 'update_cast'
+                ? mm.updateCast({
+                    cast_id: String(params.cast_id ?? ''),
+                    attitude: typeof params.attitude === 'string' ? params.attitude : undefined,
+                    learned: typeof params.learned === 'string' ? params.learned : undefined,
+                    note: typeof params.note === 'string' ? params.note : undefined,
+                  })
+                : mm.recordChoice(String(params.summary ?? ''));
+            if (result === 'success') persistModState(mm);
+          }
+          currentMessages = [
+            ...currentMessages,
+            { role: 'tool', content: result, tool_call_id: tc.id },
+          ];
           continue;
         }
 
@@ -1189,7 +1423,7 @@ const ChatPanel: React.FC<{
         {/* Left: Character Avatar */}
         <div className={styles.avatarSide}>
           <CharacterAvatar
-            character={character}
+            character={speakerCharacter}
             emotion={currentEmotion}
             onEmotionEnd={() => setCurrentEmotion(undefined)}
           />
@@ -1203,11 +1437,17 @@ const ChatPanel: React.FC<{
               onClick={() => setShowCharacterPanel(true)}
               style={{ cursor: 'pointer' }}
             >
-              <span className={styles.characterName}>{character.character_name}</span>
+              <span className={styles.characterName} data-testid="speaker-name">
+                {speakerCharacter.character_name}
+              </span>
               <ChevronRight size={14} style={{ color: 'rgba(255,255,255,0.4)' }} />
             </div>
             <div className={styles.headerActions}>
-              <div onClick={() => setShowModPanel(true)} style={{ cursor: 'pointer' }}>
+              <div
+                onClick={() => setShowModPanel(true)}
+                style={{ cursor: 'pointer' }}
+                data-testid="story-indicator"
+              >
                 <StageIndicator modManager={modManager} />
               </div>
               <button
@@ -1258,11 +1498,20 @@ const ChatPanel: React.FC<{
             </div>
           </div>
 
+          {modManager?.hasCast && (
+            <CastBar
+              modManager={modManager}
+              characters={charCollection.items}
+              disabled={loading}
+              onSelect={handleSelectSpeaker}
+            />
+          )}
+
           <div className={styles.messages} data-testid="chat-messages">
             {messages.length === 0 && (
               <div className={styles.emptyState}>
                 {hasUsableLLMConfig(config)
-                  ? `${character.character_name} is ready to chat...`
+                  ? `${speakerCharacter.character_name} is ready to chat...`
                   : 'Click the gear icon to configure your LLM connection'}
               </div>
             )}
@@ -1278,6 +1527,11 @@ const ChatPanel: React.FC<{
                         : styles.assistant
                   }`}
                 >
+                  {msg.role === 'assistant' && msg.speakerName && msg.content && (
+                    <div className={styles.speakerLabel} data-testid="speaker-label">
+                      {msg.speakerName}
+                    </div>
+                  )}
                   {msg.role === 'assistant' ? renderMessageContent(msg.content) : msg.content}
                   {msg.imageUrl && (
                     <img
@@ -1382,6 +1636,9 @@ const ChatPanel: React.FC<{
             setCharCollection(col);
             saveCharacterCollection(col);
             setShowCharacterPanel(false);
+            // In a story with a cast, picking a character who is in it makes them the speaker.
+            const member = modManagerRef.current?.cast.find((m) => m.character_id === col.activeId);
+            if (member) handleSelectSpeaker(member.id);
           }}
           onClose={() => setShowCharacterPanel(false)}
         />
@@ -1391,6 +1648,9 @@ const ChatPanel: React.FC<{
         <ModPanel
           collection={modCollection}
           initialEditId={initialEditModId}
+          characters={Object.values(charCollection.items)}
+          activeCharacterId={charCollection.activeId}
+          llmConfig={hasUsableLLMConfig(config) ? config : null}
           onSave={(col) => {
             setModCollection(col);
             saveModCollection(col);

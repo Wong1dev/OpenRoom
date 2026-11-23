@@ -28,6 +28,14 @@ export function buildSessionPath(charId: string, modId: string): string {
   return `${charId}/${modId}`;
 }
 
+/**
+ * Session path for a story with a cast: one shared timeline per story,
+ * whichever cast member the user is talking to.
+ */
+export function buildStorySessionPath(modId: string): string {
+  return `_story/${modId}`;
+}
+
 const API_PATH = '/api/session-data';
 const LS_PREFIX = 'openroom_chat_';
 
