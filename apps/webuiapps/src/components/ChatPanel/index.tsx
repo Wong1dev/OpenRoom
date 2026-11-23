@@ -43,6 +43,7 @@ import { dispatchAgentAction, onUserAction } from '@/lib/vibeContainerMock';
 import { closeAllWindows } from '@/lib/windowManager';
 import { getFileToolDefinitions, isFileTool, executeFileTool } from '@/lib/fileTools';
 import { setSessionPath } from '@/lib/sessionPath';
+import { createChatSessionGuard, type ChatSessionGuard } from '@/lib/chatSessionGuard';
 import { isTouchDevice } from '@/lib/device';
 import {
   getMemoryToolDefinitions,
@@ -536,12 +537,22 @@ const ChatPanel: React.FC<{
   const sessionPathRef = useRef(sessionPath);
   sessionPathRef.current = sessionPath;
 
+  // Tracks which session the in-memory chat belongs to, so a session switch
+  // (e.g. the server's active character arriving after the cached one) never
+  // writes one character's chat into another character's history.
+  const sessionGuardRef = useRef<ChatSessionGuard | null>(null);
+  if (!sessionGuardRef.current) sessionGuardRef.current = createChatSessionGuard(sessionPath);
+  const sessionGuard = sessionGuardRef.current;
+  sessionGuard.switchTo(sessionPath);
+
   useEffect(() => {
     if (messages.length === 0 && chatHistory.length === 0) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
+      const target = sessionGuard.saveTarget();
+      if (!target) return;
       saveChatHistory(
-        sessionPathRef.current,
+        target,
         messagesRef.current,
         chatHistoryRef.current,
         suggestedRepliesRef.current,
@@ -550,7 +561,7 @@ const ChatPanel: React.FC<{
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-  }, [messages, chatHistory, suggestedReplies]);
+  }, [messages, chatHistory, suggestedReplies, sessionGuard]);
 
   /** Seed prologue and opening replies from active mod */
   const seedPrologue = useCallback(() => {
@@ -576,6 +587,9 @@ const ChatPanel: React.FC<{
   // Reload chat history when session (character × mod) changes
   useEffect(() => {
     loadChatHistory(sessionPath).then((data) => {
+      // A load for a session that is no longer active must not be shown or saved.
+      if (!sessionGuard.isCurrent(sessionPath)) return;
+      sessionGuard.loaded(sessionPath);
       const loadedMessages = (data?.messages ?? []) as CharacterDisplayMessage[];
       const loadedHistory = data?.chatHistory ?? [];
       if (loadedMessages.length === 0 && loadedHistory.length === 0) {
@@ -603,8 +617,10 @@ const ChatPanel: React.FC<{
       }
     });
     // Load memories for SP injection
-    loadMemories(sessionPath).then(setMemories);
-  }, [sessionPath, modCollection, seedPrologue]);
+    loadMemories(sessionPath).then((loaded) => {
+      if (sessionGuard.isCurrent(sessionPath)) setMemories(loaded);
+    });
+  }, [sessionPath, modCollection, seedPrologue, sessionGuard]);
 
   // Load configs from file (async override).
   // Empty deps [] is intentional: configs (character collection, mod collection,
@@ -644,9 +660,11 @@ const ChatPanel: React.FC<{
   }, []);
 
   const handleClearHistory = useCallback(async () => {
-    await clearChatHistory(sessionPathRef.current);
+    const sp = sessionPathRef.current;
+    await clearChatHistory(sp);
+    sessionGuard.loaded(sp); // the fresh prologue now belongs to this session
     seedPrologue();
-  }, [seedPrologue]);
+  }, [seedPrologue, sessionGuard]);
 
   /** Reset entire session — clears chat, memories, app data, and mod state */
   const handleResetSession = useCallback(async () => {
@@ -688,11 +706,12 @@ const ChatPanel: React.FC<{
     }
 
     // Re-seed prologue and opening replies
+    sessionGuard.loaded(sp);
     seedPrologue();
 
     // Re-seed meta files
     await seedMetaFiles();
-  }, [modCollection, seedPrologue]);
+  }, [modCollection, seedPrologue, sessionGuard]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
