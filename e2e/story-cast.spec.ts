@@ -234,6 +234,56 @@ test.describe('Story cast', () => {
     expect(io.sessionSaves.some((p) => p.startsWith('kestrel/'))).toBe(false);
   });
 
+  test('replies sent as loose strings are shown, and the new speaker answers once', async ({
+    page,
+  }) => {
+    // What a free model on anker actually sent: the expression as one string.
+    const loose = (content: string, emotion = 'happy'): ToolCall => ({
+      name: 'respond_to_user',
+      args: {
+        character_expression: `(content: "${content}")\n(emotion: ${emotion})`,
+        user_interaction: '(suggested_replies: ["Who is that?", "Order a cider"])',
+      },
+    });
+    const io = await setup(page, {
+      mods: tavernMods(),
+      replies: [
+        toolsReply([
+          loose('(squints) Somebody else is at the bar.'),
+          { name: 'switch_speaker', args: { cast_id: 'pell', reason: 'she cuts in' } },
+          { name: 'finish_target', args: { target_ids: [1] } },
+        ]),
+        toolsReply([
+          loose('(sets down a mug) Evening. You look thirsty.'),
+          { name: 'update_cast', args: { cast_id: 'pell', attitude: 'curious' } },
+        ]),
+        // The model would happily keep talking; the turn must already be over.
+        toolsReply([say('A SECOND REPLY NOBODY ASKED FOR')]),
+      ],
+    });
+    await page.goto('/');
+    await expect(page.locator('[data-testid="speaker-name"]')).toHaveText('Kestrel Vane');
+
+    await send(page, 'Who else is in here?');
+
+    const messages = page.locator('[data-testid="chat-messages"]');
+    await expect(messages).toContainText('Somebody else is at the bar.');
+    await expect(messages).toContainText('Evening. You look thirsty.');
+    await expect(page.locator('[data-testid="speaker-label"]')).toHaveText([
+      'Kestrel Vane',
+      'Kestrel Vane',
+      'Pell',
+    ]);
+    await expect(page.locator('[data-testid="speaker-name"]')).toHaveText('Pell');
+    await expect(page.getByRole('button', { name: 'Order a cider' })).toBeVisible();
+    await expect(page.locator('[data-testid="chat-input"]')).not.toHaveAttribute(
+      'aria-busy',
+      'true',
+    );
+    expect(io.requests).toHaveLength(2);
+    await expect(messages).not.toContainText('NOBODY ASKED FOR');
+  });
+
   test('the user picks who to talk to; memory and choices survive a reload', async ({ page }) => {
     const io = await setup(page, {
       mods: tavernMods({ cast_state: { osric: { introduced: true, knows: [], notes: [] } } }),
