@@ -115,6 +115,7 @@ import {
 } from '@/lib/modManager';
 import { castMemberToCharacter } from '@/lib/storyCast';
 import { reviseNextStage } from '@/lib/storyGenerator';
+import { readRespondArgs } from '@/lib/respondArgs';
 import CharacterPanel from './CharacterPanel';
 import CastBar from './CastBar';
 import ModPanel from './ModPanel';
@@ -151,6 +152,15 @@ function hasUsableLLMConfig(config: LLMConfig | null | undefined): config is LLM
 // ---------------------------------------------------------------------------
 // Tool definitions for character system
 // ---------------------------------------------------------------------------
+
+/** Tools whose results the model does not need to see before the turn can end. */
+const TURN_END_TOOLS = new Set([
+  'respond_to_user',
+  'finish_target',
+  'switch_speaker',
+  'update_cast',
+  'record_choice',
+]);
 
 function getRespondToUserToolDef() {
   return {
@@ -1057,14 +1067,23 @@ const ChatPanel: React.FC<{
         // No tool calls — fallback plain text (shouldn't happen with respond_to_user requirement)
         const text = replaceNamePlaceholders(response.content?.trim() ?? '');
         if (text && !deliveredReply) {
+          const speaking = speakerNow();
+          const shown = hasCast ? stripSpeakerPrefix(text) : text;
           addMessage({
             id: String(Date.now()),
             role: 'assistant',
-            content: text,
+            content: shown,
+            speakerName: hasCast ? speaking.character_name : undefined,
             toolCalls:
               pendingToolCallsRef.current.length > 0 ? [...pendingToolCallsRef.current] : undefined,
           });
-          setChatHistory((prev) => [...prev, { role: 'assistant', content: text }]);
+          setChatHistory((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: hasCast ? `[${speaking.character_name}] ${shown}` : shown,
+            },
+          ]);
           if (ttsEnabledRef.current) void speak(text);
           pendingToolCallsRef.current = [];
         }
@@ -1090,15 +1109,12 @@ const ChatPanel: React.FC<{
 
         // ---- respond_to_user ----
         if (tc.function.name === 'respond_to_user') {
-          const expr =
-            (params.character_expression as { content?: string; emotion?: string }) ?? {};
-          const interaction = (params.user_interaction as { suggested_replies?: string[] }) ?? {};
-
-          const raw = replaceNamePlaceholders(expr.content ?? '');
+          const args = readRespondArgs(params, response.content);
+          const raw = replaceNamePlaceholders(args.content);
           const content = hasCast ? stripSpeakerPrefix(raw) : raw;
-          const emotion = expr.emotion;
+          const emotion = args.emotion;
           const speaking = speakerNow();
-          const replies = sanitizeSuggestedReplies(interaction.suggested_replies ?? []);
+          const replies = sanitizeSuggestedReplies(args.suggestedReplies);
           if (ttsEnabledRef.current) void speak(content);
           deliveredReply = true;
 
@@ -1363,6 +1379,15 @@ const ChatPanel: React.FC<{
 
       // Update chat history
       setChatHistory(currentMessages.slice(1));
+
+      // The current speaker has answered and nothing else needs a follow-up:
+      // end the turn instead of letting the model talk again.
+      if (
+        deliveredReply &&
+        response.toolCalls.every((tc) => TURN_END_TOOLS.has(tc.function.name))
+      ) {
+        break;
+      }
     }
   };
 
