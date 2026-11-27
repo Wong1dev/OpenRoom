@@ -27,7 +27,9 @@ import {
   getDefaultImageGenConfig,
   isImageGenConfigured,
   requiresApiKey,
-  CLOUDFLARE_ACCOUNT_PLACEHOLDER,
+  cloudflareAccountId,
+  cloudflareBaseUrl,
+  missingImageGenFields,
   type ImageGenConfig,
   type ImageGenProvider,
 } from '@/lib/imageGenClient';
@@ -1791,6 +1793,17 @@ const SettingsModal: React.FC<{
     setIgModel(defaults.model);
   };
 
+  // Cloudflare: the account ID lives in the base URL; edit it in its own field.
+  const cfAccountId = cloudflareAccountId(igBaseUrl);
+  const igCandidate: ImageGenConfig = {
+    provider: igProvider,
+    apiKey: igApiKey,
+    baseUrl: igBaseUrl,
+    model: igModel,
+    ...(igCustomHeaders.trim() ? { customHeaders: igCustomHeaders } : {}),
+  };
+  const igMissing = missingImageGenFields(igCandidate);
+
   return (
     <div className={styles.overlay} data-testid="settings-overlay">
       <div className={styles.settingsModal} data-testid="settings-modal">
@@ -1912,16 +1925,39 @@ const SettingsModal: React.FC<{
           </select>
         </div>
 
+        {igProvider === 'cloudflare' && (
+          <div className={styles.field}>
+            <label className={styles.label}>Account ID</label>
+            <input
+              className={styles.fieldInput}
+              value={cfAccountId}
+              onChange={(e) => setIgBaseUrl(cloudflareBaseUrl(e.target.value))}
+              placeholder="Cloudflare account ID"
+              data-testid="image-account-id"
+            />
+          </div>
+        )}
+
         <div className={styles.field}>
-          <label className={styles.label}>API Key</label>
+          <label className={styles.label}>
+            {igProvider === 'cloudflare' ? 'API Token (Workers AI)' : 'API Key'}
+          </label>
           <input
             className={styles.fieldInput}
             type="password"
             value={igApiKey}
             onChange={(e) => setIgApiKey(e.target.value)}
             placeholder={requiresApiKey(igProvider) ? 'API Key...' : 'Optional'}
+            data-testid="image-api-key"
           />
         </div>
+
+        {igMissing.length > 0 && (
+          <div className={styles.fieldHint} data-testid="image-missing-hint">
+            Images stay off until you fill in: {igMissing.join(', ')}. What you entered is kept when
+            you save.
+          </div>
+        )}
 
         <div className={styles.field}>
           <label className={styles.label}>Base URL</label>
@@ -1931,12 +1967,6 @@ const SettingsModal: React.FC<{
             onChange={(e) => setIgBaseUrl(e.target.value)}
             data-testid="image-base-url"
           />
-          {igProvider === 'cloudflare' && igBaseUrl.includes(CLOUDFLARE_ACCOUNT_PLACEHOLDER) && (
-            <div className={styles.fieldHint} data-testid="image-account-hint">
-              Replace {CLOUDFLARE_ACCOUNT_PLACEHOLDER} with your Cloudflare account ID, and use an
-              API token with Workers AI access as the key.
-            </div>
-          )}
         </div>
 
         <div className={styles.field}>
@@ -1974,15 +2004,9 @@ const SettingsModal: React.FC<{
                 model,
                 ...(customHeaders.trim() ? { customHeaders } : {}),
               };
-              const igCandidate: ImageGenConfig = {
-                provider: igProvider,
-                apiKey: igApiKey,
-                baseUrl: igBaseUrl,
-                model: igModel,
-                ...(igCustomHeaders.trim() ? { customHeaders: igCustomHeaders } : {}),
-              };
-              const igCfg = isImageGenConfigured(igCandidate) ? igCandidate : null;
-              onSave(llmCfg, igCfg);
+              // Keep what was entered even if incomplete, so it can be finished later;
+              // image generation itself only runs once isImageGenConfigured() is true.
+              onSave(llmCfg, igCandidate);
             }}
           >
             Save

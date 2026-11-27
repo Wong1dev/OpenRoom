@@ -342,3 +342,37 @@ describe('generateImage — Cloudflare Workers AI', () => {
     await expect(generateImage('x', CLOUDFLARE)).rejects.toThrow('No image in Cloudflare response');
   });
 });
+
+describe('Cloudflare settings helpers', () => {
+  it('reads and writes the account ID in the base URL', async () => {
+    const { cloudflareAccountId, cloudflareBaseUrl } = await import('../imageGenClient');
+    expect(cloudflareAccountId(getDefaultImageGenConfig('cloudflare').baseUrl)).toBe('');
+    expect(cloudflareAccountId('https://api.cloudflare.com/client/v4/accounts/abc123')).toBe(
+      'abc123',
+    );
+    expect(cloudflareAccountId('https://example.com')).toBe('');
+    expect(cloudflareBaseUrl(' abc123 ')).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/abc123',
+    );
+    expect(cloudflareBaseUrl('')).toContain('YOUR_ACCOUNT_ID');
+  });
+
+  it('lists what is still missing', async () => {
+    const { missingImageGenFields } = await import('../imageGenClient');
+    const cf = { ...getDefaultImageGenConfig('cloudflare'), apiKey: '' };
+    expect(missingImageGenFields(cf)).toEqual(['Account ID', 'API Token']);
+    expect(
+      missingImageGenFields({
+        ...cf,
+        baseUrl: 'https://api.cloudflare.com/client/v4/accounts/a',
+        apiKey: 't',
+      }),
+    ).toEqual([]);
+    expect(missingImageGenFields({ ...POLLINATIONS })).toEqual([]);
+    expect(missingImageGenFields({ ...OPENAI, apiKey: ' ', baseUrl: '', model: '' })).toEqual([
+      'Base URL',
+      'API Key',
+      'Model',
+    ]);
+  });
+});

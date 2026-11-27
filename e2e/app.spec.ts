@@ -523,12 +523,33 @@ test.describe('Image generation – Pollinations (free, no key)', () => {
     await page.locator('[data-testid="settings-btn"]').click();
     const modal = page.locator('[data-testid="settings-modal"]');
     await modal.locator('[data-testid="image-provider"]').selectOption('cloudflare');
-    const baseUrl = modal.locator('[data-testid="image-base-url"]');
-    await expect(baseUrl).toHaveValue(/YOUR_ACCOUNT_ID/);
-    await expect(modal.locator('[data-testid="image-account-hint"]')).toBeVisible();
-    await baseUrl.fill('https://api.cloudflare.com/client/v4/accounts/acc42');
-    await expect(modal.locator('[data-testid="image-account-hint"]')).toHaveCount(0);
-    await modal.getByPlaceholder('API Key...').last().fill('cf-token');
+    const missing = modal.locator('[data-testid="image-missing-hint"]');
+    await expect(missing).toContainText('Account ID, API Token');
+
+    // Save halfway: what was entered is kept, not replaced by the Gemini defaults.
+    await modal.locator('[data-testid="image-account-id"]').fill('acc42');
+    await expect(missing).toContainText('API Token');
+    await expect(missing).not.toContainText('Account ID');
+    await modal.locator('button', { hasText: 'Save' }).click();
+    await expect(modal).not.toBeVisible();
+    await expect
+      .poll(() => saved.at(-1)?.imageGen)
+      .toMatchObject({
+        provider: 'cloudflare',
+        apiKey: '',
+        baseUrl: 'https://api.cloudflare.com/client/v4/accounts/acc42',
+      });
+
+    // Reopen (after a reload): still Cloudflare with the account ID; add the token.
+    await page.reload();
+    await page.locator('[data-testid="settings-btn"]').click();
+    await expect(modal.locator('[data-testid="image-provider"]')).toHaveValue('cloudflare');
+    await expect(modal.locator('[data-testid="image-account-id"]')).toHaveValue('acc42');
+    await expect(modal.locator('[data-testid="image-base-url"]')).toHaveValue(
+      'https://api.cloudflare.com/client/v4/accounts/acc42',
+    );
+    await modal.locator('[data-testid="image-api-key"]').fill('cf-token');
+    await expect(missing).toHaveCount(0);
     await modal.locator('button', { hasText: 'Save' }).click();
     await expect(modal).not.toBeVisible();
     await expect

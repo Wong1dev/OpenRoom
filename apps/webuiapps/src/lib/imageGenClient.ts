@@ -7,6 +7,7 @@ export type ImageGenProvider = 'openai' | 'gemini' | 'pollinations' | 'cloudflar
 
 /** Placeholder in the Cloudflare base URL until the user fills in their account ID. */
 export const CLOUDFLARE_ACCOUNT_PLACEHOLDER = 'YOUR_ACCOUNT_ID';
+const CLOUDFLARE_ACCOUNTS_URL = 'https://api.cloudflare.com/client/v4/accounts/';
 
 export interface ImageGenConfig {
   provider: ImageGenProvider;
@@ -44,7 +45,7 @@ const DEFAULT_CONFIGS: Record<ImageGenProvider, Omit<ImageGenConfig, 'apiKey'>> 
   },
   cloudflare: {
     provider: 'cloudflare',
-    baseUrl: `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_PLACEHOLDER}`,
+    baseUrl: `${CLOUDFLARE_ACCOUNTS_URL}${CLOUDFLARE_ACCOUNT_PLACEHOLDER}`,
     model: '@cf/black-forest-labs/flux-1-schnell',
   },
 };
@@ -61,6 +62,32 @@ export function isImageGenConfigured(config: ImageGenConfig | null | undefined):
   if (!config?.baseUrl?.trim()) return false;
   if (config.baseUrl.includes(CLOUDFLARE_ACCOUNT_PLACEHOLDER)) return false;
   return !requiresApiKey(config.provider) || !!config.apiKey?.trim();
+}
+
+/** The account ID inside a Cloudflare base URL ('' while it is still the placeholder). */
+export function cloudflareAccountId(baseUrl: string): string {
+  const id = /\/accounts\/([^/?#]+)/.exec(baseUrl)?.[1] ?? '';
+  return id === CLOUDFLARE_ACCOUNT_PLACEHOLDER ? '' : id;
+}
+
+/** Base URL for a Cloudflare account ID (the placeholder when empty). */
+export function cloudflareBaseUrl(accountId: string): string {
+  return CLOUDFLARE_ACCOUNTS_URL + (accountId.trim() || CLOUDFLARE_ACCOUNT_PLACEHOLDER);
+}
+
+/** Names of the fields that still have to be filled in before images can be made. */
+export function missingImageGenFields(config: ImageGenConfig): string[] {
+  const missing: string[] = [];
+  if (config.provider === 'cloudflare') {
+    if (!cloudflareAccountId(config.baseUrl)) missing.push('Account ID');
+  } else if (!config.baseUrl.trim()) {
+    missing.push('Base URL');
+  }
+  if (requiresApiKey(config.provider) && !config.apiKey.trim()) {
+    missing.push(config.provider === 'cloudflare' ? 'API Token' : 'API Key');
+  }
+  if (!config.model.trim()) missing.push('Model');
+  return missing;
 }
 
 export function getDefaultImageGenConfig(
