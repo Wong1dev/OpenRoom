@@ -502,6 +502,104 @@ test.describe('Image generation – Pollinations (free, no key)', () => {
     expect(saved.at(-1)).toMatchObject({ imageGen: pollinations });
   });
 
+  test('Cloudflare Workers AI is set up in Settings and draws through the proxy', async ({
+    page,
+  }) => {
+    await mockLLM(page);
+    const saved: Array<{ imageGen?: Record<string, string> }> = [];
+    let served = { llm } as Record<string, unknown>;
+    await page.route('**/api/llm-config', (route) => {
+      if (route.request().method() === 'POST') {
+        served = route.request().postDataJSON();
+        saved.push(served as never);
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(served),
+      });
+    });
+    await page.goto('/');
+    await page.locator('[data-testid="settings-btn"]').click();
+    const modal = page.locator('[data-testid="settings-modal"]');
+    await modal.locator('[data-testid="image-provider"]').selectOption('cloudflare');
+    const baseUrl = modal.locator('[data-testid="image-base-url"]');
+    await expect(baseUrl).toHaveValue(/YOUR_ACCOUNT_ID/);
+    await expect(modal.locator('[data-testid="image-account-hint"]')).toBeVisible();
+    await baseUrl.fill('https://api.cloudflare.com/client/v4/accounts/acc42');
+    await expect(modal.locator('[data-testid="image-account-hint"]')).toHaveCount(0);
+    await modal.getByPlaceholder('API Key...').last().fill('cf-token');
+    await modal.locator('button', { hasText: 'Save' }).click();
+    await expect(modal).not.toBeVisible();
+    await expect
+      .poll(() => saved.at(-1)?.imageGen)
+      .toMatchObject({
+        provider: 'cloudflare',
+        apiKey: 'cf-token',
+        baseUrl: 'https://api.cloudflare.com/client/v4/accounts/acc42',
+        model: '@cf/black-forest-labs/flux-1-schnell',
+      });
+
+    // The model asks for a picture; it is drawn by Cloudflare via the proxy.
+    const cfTargets: string[] = [];
+    await page.unroute('**/api/llm-proxy');
+    await page.unroute('http://llm.test/**');
+    const fulfill = (route: import('@playwright/test').Route) => {
+      if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204 });
+      const target = route.request().headers()['x-llm-target-url'] ?? '';
+      if (target.includes('api.cloudflare.com')) {
+        cfTargets.push(target);
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ success: true, result: { image: PNG.toString('base64') } }),
+        });
+      }
+      const body = route.request().postDataJSON() as {
+        messages: Array<{ role: string; tool_call_id?: string }>;
+      };
+      const last = body.messages.at(-1);
+      const call = (name: string, args: unknown) => ({
+        choices: [
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                {
+                  id: `call_${name}`,
+                  type: 'function',
+                  function: { name, arguments: JSON.stringify(args) },
+                },
+              ],
+            },
+          },
+        ],
+      });
+      const reply =
+        last?.role !== 'tool'
+          ? call('generate_image', { prompt: 'a glass card' })
+          : call('respond_to_user', { character_expression: { content: 'Look at this.' } });
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(reply),
+      });
+    };
+    await page.route('**/api/llm-proxy', fulfill);
+    await page.route('http://llm.test/**', fulfill);
+
+    await page.locator('[data-testid="chat-input"]').fill('Show me the card');
+    await page.locator('[data-testid="send-btn"]').click();
+    const image = page.locator('[data-testid="generated-image"]').last();
+    await expect(image).toBeVisible();
+    await expect(image).toHaveAttribute('src', /^data:image\/png;base64,/);
+    expect(cfTargets).toEqual([
+      'https://api.cloudflare.com/client/v4/accounts/acc42/ai/run/@cf/black-forest-labs/flux-1-schnell',
+    ]);
+  });
+
   test('the character generates an image and it is shown in chat', async ({ page }) => {
     await mockLLM(page);
     await page.route('**/api/llm-config', (route) =>

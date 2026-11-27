@@ -287,3 +287,58 @@ describe('generateImageFile / isImageGenAvailable', () => {
     );
   });
 });
+
+describe('generateImage — Cloudflare Workers AI', () => {
+  const CLOUDFLARE: ImageGenConfig = {
+    provider: 'cloudflare',
+    apiKey: ' cf-token ',
+    baseUrl: 'https://api.cloudflare.com/client/v4/accounts/abc123/',
+    model: '@cf/black-forest-labs/flux-1-schnell',
+  };
+
+  it('is only configured once the account ID and token are filled in', () => {
+    const defaults = getDefaultImageGenConfig('cloudflare');
+    expect(defaults.baseUrl).toContain('YOUR_ACCOUNT_ID');
+    expect(requiresApiKey('cloudflare')).toBe(true);
+    expect(isImageGenConfigured({ ...defaults, apiKey: 'cf-token' })).toBe(false);
+    expect(isImageGenConfigured({ ...CLOUDFLARE, apiKey: '' })).toBe(false);
+    expect(isImageGenConfigured(CLOUDFLARE)).toBe(true);
+  });
+
+  it('runs the model through the proxy and reads the JSON image (FLUX)', async () => {
+    fetchMock.mockResolvedValue(Response.json({ success: true, result: { image: '/9j/AAAA' } }));
+    const out = await generateImage('a glass card', CLOUDFLARE);
+    expect(out).toEqual({ base64: '/9j/AAAA', mimeType: 'image/jpeg' });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/llm-proxy');
+    expect(init.headers['X-LLM-Target-URL']).toBe(
+      'https://api.cloudflare.com/client/v4/accounts/abc123/ai/run/@cf/black-forest-labs/flux-1-schnell',
+    );
+    expect(init.headers.Authorization).toBe('Bearer cf-token');
+    expect(JSON.parse(init.body)).toEqual({ prompt: 'a glass card', steps: 8 });
+  });
+
+  it('reads raw image answers (Stable Diffusion) and PNG base64', async () => {
+    const sdxl = { ...CLOUDFLARE, model: '@cf/stabilityai/stable-diffusion-xl-base-1.0' };
+    fetchMock.mockResolvedValueOnce(imageResponse(PNG_BYTES, 'image/png'));
+    const raw = await generateImage('x', sdxl);
+    expect(raw.mimeType).toBe('image/png');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ prompt: 'x' });
+
+    fetchMock.mockResolvedValueOnce(Response.json({ result: { image: 'iVBORw0K' } }));
+    expect((await generateImage('x', CLOUDFLARE)).mimeType).toBe('image/png');
+  });
+
+  it('reports Cloudflare errors', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('{"errors":[{"message":"bad token"}]}', { status: 401 }),
+    );
+    await expect(generateImage('x', CLOUDFLARE)).rejects.toThrow('Cloudflare image error 401');
+    fetchMock.mockResolvedValueOnce(
+      Response.json({ success: false, errors: [{ message: 'daily allowance used up' }] }),
+    );
+    await expect(generateImage('x', CLOUDFLARE)).rejects.toThrow('daily allowance used up');
+    fetchMock.mockResolvedValueOnce(Response.json({}));
+    await expect(generateImage('x', CLOUDFLARE)).rejects.toThrow('No image in Cloudflare response');
+  });
+});
