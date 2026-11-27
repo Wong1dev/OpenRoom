@@ -27,6 +27,7 @@ import {
   getDefaultImageGenConfig,
   isImageGenConfigured,
   requiresApiKey,
+  CLOUDFLARE_ACCOUNT_PLACEHOLDER,
   type ImageGenConfig,
   type ImageGenProvider,
 } from '@/lib/imageGenClient';
@@ -1906,7 +1907,8 @@ const SettingsModal: React.FC<{
           >
             <option value="openai">OpenAI</option>
             <option value="gemini">Gemini</option>
-            <option value="pollinations">Pollinations (free, no key)</option>
+            <option value="pollinations">Pollinations</option>
+            <option value="cloudflare">Cloudflare Workers AI (free daily allowance)</option>
           </select>
         </div>
 
@@ -1927,7 +1929,14 @@ const SettingsModal: React.FC<{
             className={styles.fieldInput}
             value={igBaseUrl}
             onChange={(e) => setIgBaseUrl(e.target.value)}
+            data-testid="image-base-url"
           />
+          {igProvider === 'cloudflare' && igBaseUrl.includes(CLOUDFLARE_ACCOUNT_PLACEHOLDER) && (
+            <div className={styles.fieldHint} data-testid="image-account-hint">
+              Replace {CLOUDFLARE_ACCOUNT_PLACEHOLDER} with your Cloudflare account ID, and use an
+              API token with Workers AI access as the key.
+            </div>
+          )}
         </div>
 
         <div className={styles.field}>

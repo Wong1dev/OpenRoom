@@ -1,9 +1,12 @@
 /**
  * Image Generation API Client
- * Supports OpenAI (DALL-E), Gemini, and Pollinations.ai (free, no key) formats
+ * Supports OpenAI (DALL-E), Gemini, Pollinations.ai and Cloudflare Workers AI formats
  */
 
-export type ImageGenProvider = 'openai' | 'gemini' | 'pollinations';
+export type ImageGenProvider = 'openai' | 'gemini' | 'pollinations' | 'cloudflare';
+
+/** Placeholder in the Cloudflare base URL until the user fills in their account ID. */
+export const CLOUDFLARE_ACCOUNT_PLACEHOLDER = 'YOUR_ACCOUNT_ID';
 
 export interface ImageGenConfig {
   provider: ImageGenProvider;
@@ -39,6 +42,11 @@ const DEFAULT_CONFIGS: Record<ImageGenProvider, Omit<ImageGenConfig, 'apiKey'>> 
     baseUrl: 'https://image.pollinations.ai',
     model: 'flux',
   },
+  cloudflare: {
+    provider: 'cloudflare',
+    baseUrl: `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_PLACEHOLDER}`,
+    model: '@cf/black-forest-labs/flux-1-schnell',
+  },
 };
 
 /** Providers that work without an API key. */
@@ -51,6 +59,7 @@ export function requiresApiKey(provider: ImageGenProvider): boolean {
 /** True when image generation is usable: a key is set, or the provider needs none. */
 export function isImageGenConfigured(config: ImageGenConfig | null | undefined): boolean {
   if (!config?.baseUrl?.trim()) return false;
+  if (config.baseUrl.includes(CLOUDFLARE_ACCOUNT_PLACEHOLDER)) return false;
   return !requiresApiKey(config.provider) || !!config.apiKey?.trim();
 }
 
@@ -130,7 +139,52 @@ export async function generateImage(
   if (config.provider === 'pollinations') {
     return generateImagePollinations(prompt, config);
   }
+  if (config.provider === 'cloudflare') {
+    return generateImageCloudflare(prompt, config);
+  }
   return generateImageOpenAI(prompt, config);
+}
+
+/**
+ * Cloudflare Workers AI (free daily allowance). Sent through the dev-server
+ * proxy because the Cloudflare API doesn't allow browser requests. FLUX models
+ * answer with JSON holding a base64 JPEG; Stable Diffusion models with raw PNG.
+ */
+async function generateImageCloudflare(
+  prompt: string,
+  config: ImageGenConfig,
+): Promise<ImageGenResult> {
+  const base = config.baseUrl.replace(/\/+$/, '');
+  const model = config.model.trim().replace(/^\/+/, '');
+  const body: Record<string, unknown> = { prompt };
+  if (/flux-1-schnell/.test(model)) body.steps = 8;
+
+  const res = await fetch('/api/llm-proxy', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey.trim()}`,
+      'X-LLM-Target-URL': `${base}/ai/run/${model}`,
+      ...parseCustomHeaders(config.customHeaders),
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Cloudflare image error ${res.status}: ${text.slice(0, 300)}`);
+  }
+  const mimeType = (res.headers.get('Content-Type') || '').split(';')[0].trim();
+  if (mimeType.startsWith('image/')) {
+    return { base64: arrayBufferToBase64(await res.arrayBuffer()), mimeType };
+  }
+  const data = await res.json();
+  const image = data?.result?.image;
+  if (typeof image !== 'string' || !image) {
+    const why = data?.errors?.[0]?.message;
+    throw new Error(`No image in Cloudflare response${why ? `: ${why}` : ''}`);
+  }
+  return { base64: image, mimeType: image.startsWith('iVBOR') ? 'image/png' : 'image/jpeg' };
 }
 
 async function generateImageOpenAI(
