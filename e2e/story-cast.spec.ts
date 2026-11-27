@@ -330,6 +330,34 @@ test.describe('Story cast', () => {
     expect(io.requests).toHaveLength(1);
   });
 
+  test('a reply written next to bookkeeping calls is shown, and the turn ends', async ({
+    page,
+  }) => {
+    // Seen on anker: the reply is in the message text, the tool calls are only bookkeeping.
+    const withText = toolsReply([
+      { name: 'record_choice', args: { summary: 'Told Kestrel to keep the card' } },
+      { name: 'finish_target', args: { target_ids: [1] } },
+    ]);
+    withText.choices[0].message.content =
+      "[Kestrel Vane] (tucks the card away) Bossy, aren't you? I'll wait.\n<|emotion|>happy<|/emotion|>";
+    const io = await setup(page, {
+      mods: tavernMods(),
+      replies: [withText, textReply('(Already responded as Kestrel in the previous turn.)')],
+    });
+    await page.goto('/');
+    await send(page, 'Keep the card for now.');
+
+    const messages = page.locator('[data-testid="chat-messages"]');
+    await expect(messages).toContainText("Bossy, aren't you? I'll wait.");
+    await expect(page.locator('[data-testid="speaker-label"]').last()).toHaveText('Kestrel Vane');
+    await expect
+      .poll(() => io.lastMods().items.tavern.state.plot_log)
+      .toEqual(['Told Kestrel to keep the card']);
+    expect(io.requests).toHaveLength(1);
+    await expect(messages).not.toContainText('Already responded');
+    await expect(messages).not.toContainText('[Kestrel Vane]');
+  });
+
   test('the user picks who to talk to; memory and choices survive a reload', async ({ page }) => {
     const io = await setup(page, {
       mods: tavernMods({ cast_state: { osric: { introduced: true, knows: [], notes: [] } } }),
