@@ -147,6 +147,13 @@ export async function dispatchAgentAction(action: {
     if (action.action_type === 'SET_WALLPAPER') {
       const url = action.params?.wallpaper_url;
       if (!url) return 'error: missing wallpaper_url';
+      // Models sometimes pass a made-up name after image generation failed; that blanks the screen.
+      if (!/^(https?:\/\/|data:image\/|blob:|\/)/i.test(url.trim())) {
+        return (
+          'error: wallpaper_url must be an image URL (https://…, data:image/… or /api/session-data…). ' +
+          'Use the url returned by generate_image; if it failed, keep the current wallpaper.'
+        );
+      }
       await idb.putTextFilesByJSON({
         files: [
           {

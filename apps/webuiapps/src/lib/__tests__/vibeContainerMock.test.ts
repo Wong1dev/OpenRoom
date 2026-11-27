@@ -231,3 +231,21 @@ describe('getCharacterInfo', () => {
     localStorage.clear();
   });
 });
+
+describe('dispatchAgentAction – SET_WALLPAPER', () => {
+  it('accepts image URLs and rejects made-up names', async () => {
+    vi.resetModules();
+    const { dispatchAgentAction, onOSEvent } = await import('../vibeContainerMock');
+    const events: unknown[] = [];
+    onOSEvent((e: unknown) => events.push(e));
+    const set = (wallpaper_url: string) =>
+      dispatchAgentAction({ app_id: 1, action_type: 'SET_WALLPAPER', params: { wallpaper_url } });
+
+    expect(await set('split_glass_window')).toMatch(/^error: wallpaper_url must be an image URL/);
+    expect(await set('')).toBe('error: missing wallpaper_url');
+    expect(await set('/api/session-data?path=x.png')).toBe('success');
+    expect(await set('https://example.com/a.jpg')).toBe('success');
+    expect(await set('data:image/png;base64,AAAA')).toBe('success');
+    expect(events).toHaveLength(3);
+  });
+});
