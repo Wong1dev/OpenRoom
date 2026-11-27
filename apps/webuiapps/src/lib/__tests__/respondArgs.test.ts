@@ -111,3 +111,16 @@ describe('readRespondArgs: tags written into the text', () => {
     expect(readRespondArgs({}, text).content).toBe(text);
   });
 });
+
+describe('readRespondArgs: list followed by a tag and a rule', () => {
+  it('still finds the list (seen on anker)', () => {
+    const text =
+      'I am not sure I was right.\n\n\n\nSuggested replies:\n- "Why?"\n- "How do I open it?"\n\n' +
+      '<|emotion|>default<|emotion|>\n\n---';
+    expect(readRespondArgs({}, text)).toEqual({
+      content: 'I am not sure I was right.',
+      emotion: 'default',
+      suggestedReplies: ['Why?', 'How do I open it?'],
+    });
+  });
+});

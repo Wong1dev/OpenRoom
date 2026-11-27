@@ -585,6 +585,9 @@ export class ModManager {
       `IMPORTANT: When you determine a target has been achieved through the conversation, ` +
       `call the finish_target tool with the target_id(s). Do NOT announce target completion ` +
       `to the user — just naturally continue the conversation.\n` +
+      `Only finish a target once it has actually happened in the conversation, never because it is ` +
+      `planned or about to happen. Play scenes out turn by turn and let the user take part; ` +
+      `do not skip ahead to later stages.\n` +
       cast
     );
   }

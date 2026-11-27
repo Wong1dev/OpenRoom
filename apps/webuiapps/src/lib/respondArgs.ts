@@ -91,6 +91,8 @@ function splitReplyText(text: string): RespondArgs {
     emotion = tag[1];
     content = content.replace(EMOTION_TAG_RE, '');
   }
+  // A horizontal rule some models end with ("---").
+  content = content.replace(/\n\s*(?:-{3,}|\*{3,}|_{3,})\s*$/, '');
   let suggestedReplies: string[] = [];
   const block = SUGGESTED_BLOCK_RE.exec(content);
   if (block) {

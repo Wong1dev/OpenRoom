@@ -178,6 +178,7 @@ describe('ModManager with a cast', () => {
     expect(mm.recordChoice('Trusted Pell')).toBe('success');
     expect(mm.getState().plot_log).toEqual(['Trusted Pell']);
     expect(mm.buildStageReminder()).toContain('You are speaking as Pell');
+    expect(mm.buildStageReminder()).toContain('Only finish a target once it has actually happened');
   });
 
   it('keeps the cast in free mode and when the stage is missing', () => {
