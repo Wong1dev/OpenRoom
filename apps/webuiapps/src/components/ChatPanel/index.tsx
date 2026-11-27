@@ -1066,45 +1066,61 @@ const ChatPanel: React.FC<{
     // Set once respond_to_user has shown a reply this turn; some models then echo it as plain text.
     let deliveredReply = false;
 
+    /** Show reply text the model wrote as plain content. Returns whether anything was shown. */
+    const showTextReply = (raw: string | null | undefined, addToHistory: boolean): boolean => {
+      // Some models write the emotion and suggested replies into the text itself.
+      const parsed = readRespondArgs({}, replaceNamePlaceholders(raw?.trim() ?? ''));
+      if (!parsed.content) return false;
+      const speaking = speakerNow();
+      const shown = hasCast ? stripSpeakerPrefix(parsed.content) : parsed.content;
+      const replies = sanitizeSuggestedReplies(parsed.suggestedReplies);
+      addMessage({
+        id: String(Date.now()),
+        role: 'assistant',
+        content: shown,
+        emotion: parsed.emotion,
+        speakerName: hasCast ? speaking.character_name : undefined,
+        suggestedReplies: replies,
+        toolCalls:
+          pendingToolCallsRef.current.length > 0 ? [...pendingToolCallsRef.current] : undefined,
+      });
+      setSuggestedReplies(replies);
+      if (parsed.emotion) {
+        clearEmotionVideoCache(speaking.id);
+        setCurrentEmotion(parsed.emotion);
+      }
+      if (addToHistory) {
+        setChatHistory((prev) => [
+          ...prev,
+          { role: 'assistant', content: hasCast ? `[${speaking.character_name}] ${shown}` : shown },
+        ]);
+      }
+      if (ttsEnabledRef.current) void speak(shown);
+      pendingToolCallsRef.current = [];
+      return true;
+    };
+
     while (iterations < maxIterations) {
       iterations++;
       const response = await chat(currentMessages, tools, cfg);
 
       if (response.toolCalls.length === 0) {
         // No tool calls — fallback plain text (shouldn't happen with respond_to_user requirement)
-        const text = replaceNamePlaceholders(response.content?.trim() ?? '');
-        // Some models write the emotion and suggested replies into the text itself.
-        const parsed = readRespondArgs({}, text);
-        if (parsed.content && !deliveredReply) {
-          const speaking = speakerNow();
-          const shown = hasCast ? stripSpeakerPrefix(parsed.content) : parsed.content;
-          const replies = sanitizeSuggestedReplies(parsed.suggestedReplies);
-          addMessage({
-            id: String(Date.now()),
-            role: 'assistant',
-            content: shown,
-            emotion: parsed.emotion,
-            speakerName: hasCast ? speaking.character_name : undefined,
-            suggestedReplies: replies,
-            toolCalls:
-              pendingToolCallsRef.current.length > 0 ? [...pendingToolCallsRef.current] : undefined,
-          });
-          setSuggestedReplies(replies);
-          if (parsed.emotion) {
-            clearEmotionVideoCache(speaking.id);
-            setCurrentEmotion(parsed.emotion);
-          }
-          setChatHistory((prev) => [
-            ...prev,
-            {
-              role: 'assistant',
-              content: hasCast ? `[${speaking.character_name}] ${shown}` : shown,
-            },
-          ]);
-          if (ttsEnabledRef.current) void speak(shown);
-          pendingToolCallsRef.current = [];
-        }
+        if (!deliveredReply) showTextReply(response.content, true);
         break;
+      }
+
+      // The reply was written as plain text next to bookkeeping calls only
+      // (e.g. record_choice + finish_target) instead of through respond_to_user.
+      if (
+        !deliveredReply &&
+        response.toolCalls.every(
+          (tc) => TURN_END_TOOLS.has(tc.function.name) && tc.function.name !== 'respond_to_user',
+        ) &&
+        response.toolCalls.every((tc) => tc.function.name !== 'switch_speaker') &&
+        showTextReply(response.content, false)
+      ) {
+        deliveredReply = true;
       }
 
       // Has tool calls
