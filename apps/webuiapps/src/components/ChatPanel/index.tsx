@@ -113,7 +113,7 @@ import {
   saveModCollection,
   getActiveModEntry,
 } from '@/lib/modManager';
-import { castMemberToCharacter } from '@/lib/storyCast';
+import { castMemberToCharacter, findAddressedMember } from '@/lib/storyCast';
 import { reviseNextStage } from '@/lib/storyGenerator';
 import { readRespondArgs } from '@/lib/respondArgs';
 import CharacterPanel from './CharacterPanel';
@@ -997,6 +997,13 @@ const ChatPanel: React.FC<{
       if (!overrideText) setInput('');
       setSuggestedReplies([]);
 
+      // "Kestrel, ..." — the user is talking to someone they've met: they answer.
+      const mm = modManagerRef.current;
+      if (mm?.hasCast) {
+        const addressed = findAddressedMember(mm.cast, mm.getState(), text, mm.getConfig().lead_id);
+        if (addressed) handleSelectSpeaker(addressed);
+      }
+
       const userDisplay: CharacterDisplayMessage = {
         id: String(Date.now()),
         role: 'user',
@@ -1021,7 +1028,7 @@ const ChatPanel: React.FC<{
         setLoading(false);
       }
     },
-    [input, loading, config, chatHistory, addMessage],
+    [input, loading, config, chatHistory, addMessage, handleSelectSpeaker],
   );
 
   // Core conversation loop
@@ -1066,17 +1073,27 @@ const ChatPanel: React.FC<{
       if (response.toolCalls.length === 0) {
         // No tool calls — fallback plain text (shouldn't happen with respond_to_user requirement)
         const text = replaceNamePlaceholders(response.content?.trim() ?? '');
-        if (text && !deliveredReply) {
+        // Some models write the emotion and suggested replies into the text itself.
+        const parsed = readRespondArgs({}, text);
+        if (parsed.content && !deliveredReply) {
           const speaking = speakerNow();
-          const shown = hasCast ? stripSpeakerPrefix(text) : text;
+          const shown = hasCast ? stripSpeakerPrefix(parsed.content) : parsed.content;
+          const replies = sanitizeSuggestedReplies(parsed.suggestedReplies);
           addMessage({
             id: String(Date.now()),
             role: 'assistant',
             content: shown,
+            emotion: parsed.emotion,
             speakerName: hasCast ? speaking.character_name : undefined,
+            suggestedReplies: replies,
             toolCalls:
               pendingToolCallsRef.current.length > 0 ? [...pendingToolCallsRef.current] : undefined,
           });
+          setSuggestedReplies(replies);
+          if (parsed.emotion) {
+            clearEmotionVideoCache(speaking.id);
+            setCurrentEmotion(parsed.emotion);
+          }
           setChatHistory((prev) => [
             ...prev,
             {
@@ -1084,7 +1101,7 @@ const ChatPanel: React.FC<{
               content: hasCast ? `[${speaking.character_name}] ${shown}` : shown,
             },
           ]);
-          if (ttsEnabledRef.current) void speak(text);
+          if (ttsEnabledRef.current) void speak(shown);
           pendingToolCallsRef.current = [];
         }
         break;

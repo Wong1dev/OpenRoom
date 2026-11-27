@@ -221,3 +221,58 @@ export function buildCastPrompt(
     `- These calls are silent: never mention them to the user.\n`;
   return out;
 }
+
+/** Titles that are not enough on their own to address someone ("Brother", "Madam"...). */
+const TITLE_WORDS = new Set([
+  'the',
+  'mr',
+  'mrs',
+  'ms',
+  'miss',
+  'sir',
+  'lady',
+  'lord',
+  'madam',
+  'mother',
+  'father',
+  'brother',
+  'sister',
+  'captain',
+  'old',
+]);
+const LEAD_IN = '(?:(?:hey|hi|hello|ok|okay|so|and|well|oh|wait|listen|now)[\\s,]+)?';
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** The ways a member can be called: full name, and each non-title word of it. */
+function callNames(member: CastMember): string[] {
+  const words = member.name
+    .split(/\s+/)
+    .map((w) => w.replace(/[^\p{L}\p{N}'-]/gu, ''))
+    .filter((w) => w.length >= 3 && !TITLE_WORDS.has(w.toLowerCase()));
+  return [member.name, ...words];
+}
+
+/**
+ * The cast member the user's message opens by addressing ("Kestrel, keep the
+ * card", "Hey Aoi! ..."), if they have already met. Weaker models often don't
+ * hand the scene over themselves, so the app does it.
+ */
+export function findAddressedMember(
+  cast: CastMember[],
+  state: CastStateFields,
+  text: string,
+  leadId?: string,
+): string | null {
+  const opening = text.trim();
+  for (const member of cast) {
+    if (!isIntroduced(cast, state, member.id, leadId)) continue;
+    for (const name of callNames(member)) {
+      const re = new RegExp(`^${LEAD_IN}${escapeRegExp(name)}(?:\\s*[,:!?.—–-]|\\s*$)`, 'iu');
+      if (re.test(opening)) return member.id;
+    }
+  }
+  return null;
+}

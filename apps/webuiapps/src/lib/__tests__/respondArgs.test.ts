@@ -68,3 +68,46 @@ describe('readRespondArgs', () => {
     expect(readRespondArgs({ character_expression: 'content: "a\\qb"' }).content).toBe('a\\qb');
   });
 });
+
+describe('readRespondArgs: tags written into the text', () => {
+  // Plain-text replies seen on anker.
+  const leaked =
+    "(smiles) Keep it safe? You sound like you think I'm careless, love.\n\n" +
+    '<|emotion|>happy<|/emotion|>\n\nSuggested replies:\n- "Here\'s a secret"\n- "I\'ll buy you a drink"\n- What does it show?';
+
+  it('takes the emotion tag and the suggested replies out of plain text', () => {
+    expect(readRespondArgs({}, leaked)).toEqual({
+      content: "(smiles) Keep it safe? You sound like you think I'm careless, love.",
+      emotion: 'happy',
+      suggestedReplies: ["Here's a secret", "I'll buy you a drink", 'What does it show?'],
+    });
+  });
+
+  it('handles an unclosed tag, numbered lists and keeps tool-given fields first', () => {
+    const args = readRespondArgs(
+      {
+        character_expression: {
+          content: 'Fine.\n<|emotion|>angry<|emotion|>\n**Suggested:**\n1. Sorry\n2) Go on',
+          emotion: 'shy',
+        },
+      },
+      null,
+    );
+    expect(args).toEqual({
+      content: 'Fine.',
+      emotion: 'shy',
+      suggestedReplies: ['Sorry', 'Go on'],
+    });
+    expect(
+      readRespondArgs({
+        character_expression: { content: 'Hi\n\nSuggested replies:\n- a' },
+        user_interaction: { suggested_replies: ['b'] },
+      }).suggestedReplies,
+    ).toEqual(['b']);
+  });
+
+  it('leaves text that only mentions suggestions alone', () => {
+    const text = 'I suggested replies were overrated.';
+    expect(readRespondArgs({}, text).content).toBe(text);
+  });
+});

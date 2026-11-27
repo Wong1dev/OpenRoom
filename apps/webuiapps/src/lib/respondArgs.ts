@@ -73,6 +73,41 @@ function readReplies(raw: unknown): string[] {
   return Array.isArray(value) ? value.filter((r): r is string => typeof r === 'string') : [];
 }
 
+/** `<|emotion|>happy<|/emotion|>` (closing bar/slash optional) anywhere in the text. */
+const EMOTION_TAG_RE = /<\|?\s*emotion\s*\|?>\s*([a-z_]+)\s*<\|?\s*\/?\s*emotion\s*\|?>/i;
+/** A trailing "Suggested replies:" heading followed by a bullet or numbered list. */
+const SUGGESTED_BLOCK_RE =
+  /\n\s*\**\s*suggested(?:\s+replies)?\s*\**\s*:?\s*\**\s*\n((?:[ \t]*(?:[-*•]|\d+[.)])[ \t]*.+(?:\n|$))+)\s*$/i;
+
+/**
+ * Pull an emotion tag and a suggested-replies list out of reply text, where some
+ * models write them instead of using the tool's fields.
+ */
+function splitReplyText(text: string): RespondArgs {
+  let content = text;
+  let emotion: string | undefined;
+  const tag = EMOTION_TAG_RE.exec(content);
+  if (tag) {
+    emotion = tag[1];
+    content = content.replace(EMOTION_TAG_RE, '');
+  }
+  let suggestedReplies: string[] = [];
+  const block = SUGGESTED_BLOCK_RE.exec(content);
+  if (block) {
+    suggestedReplies = block[1]
+      .split('\n')
+      .map((line) =>
+        line
+          .replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '')
+          .trim()
+          .replace(/^["“'](.*)["”']$/, '$1'),
+      )
+      .filter(Boolean);
+    content = content.slice(0, block.index);
+  }
+  return { content: content.trim(), emotion, suggestedReplies };
+}
+
 /**
  * Normalise respond_to_user params. `plainText` is the assistant message's own
  * content, used when the tool call carries no text.
@@ -86,6 +121,9 @@ export function readRespondArgs(params: Obj, plainText?: string | null): Respond
     content = (fallback.content ?? '').trim();
     emotion = emotion ?? fallback.emotion;
   }
-  const suggestedReplies = readReplies(params.user_interaction ?? params.suggested_replies);
-  return { content, emotion: emotion?.toLowerCase(), suggestedReplies };
+  const inText = splitReplyText(content);
+  let suggestedReplies = readReplies(params.user_interaction ?? params.suggested_replies);
+  if (!suggestedReplies.length) suggestedReplies = inText.suggestedReplies;
+  emotion = emotion ?? inText.emotion;
+  return { content: inText.content, emotion: emotion?.toLowerCase(), suggestedReplies };
 }
