@@ -284,6 +284,52 @@ test.describe('Story cast', () => {
     await expect(messages).not.toContainText('NOBODY ASKED FOR');
   });
 
+  test('calling a met cast member by name makes them answer', async ({ page }) => {
+    const io = await setup(page, {
+      mods: tavernMods({ cast_state: { pell: { introduced: true, knows: [], notes: [] } } }),
+      replies: [toolsReply([say('(slides a mug over) On the house. Once.')])],
+    });
+    await page.goto('/');
+    await expect(page.locator('[data-testid="speaker-name"]')).toHaveText('Kestrel Vane');
+
+    await send(page, 'Pell, could I get a cider?');
+
+    const messages = page.locator('[data-testid="chat-messages"]');
+    await expect(messages).toContainText('On the house. Once.');
+    await expect(messages).toContainText('You turn to Pell.');
+    await expect(page.locator('[data-testid="speaker-name"]')).toHaveText('Pell');
+    await expect(page.locator('[data-testid="speaker-label"]').last()).toHaveText('Pell');
+    expect(systemOf(io.requests[0])).toContain('You are speaking as Pell');
+    await expect.poll(() => io.lastMods().items.tavern.state.speaker_id).toBe('pell');
+
+    // A name in the middle of a sentence does not switch anyone.
+    await send(page, 'Ask Kestrel Vane if she cheats.');
+    await expect.poll(() => io.requests.length).toBe(2);
+    expect(systemOf(io.requests[1])).toContain('You are speaking as Pell');
+  });
+
+  test('a plain-text reply with tags written into it is shown cleanly', async ({ page }) => {
+    const io = await setup(page, {
+      mods: tavernMods(),
+      replies: [
+        textReply(
+          '(taps a card) Keep it safe? Cheeky.\n\n<|emotion|>happy<|/emotion|>\n\n' +
+            'Suggested replies:\n- "Here\'s a secret"\n- "Buy you a drink"',
+        ),
+      ],
+    });
+    await page.goto('/');
+    await send(page, 'Keep the card safe.');
+
+    const messages = page.locator('[data-testid="chat-messages"]');
+    await expect(messages).toContainText('Keep it safe? Cheeky.');
+    await expect(messages).not.toContainText('emotion|');
+    await expect(messages).not.toContainText('Suggested replies');
+    await expect(page.getByRole('button', { name: 'Buy you a drink' })).toBeVisible();
+    await expect(page.locator('[data-testid="speaker-label"]').last()).toHaveText('Kestrel Vane');
+    expect(io.requests).toHaveLength(1);
+  });
+
   test('the user picks who to talk to; memory and choices survive a reload', async ({ page }) => {
     const io = await setup(page, {
       mods: tavernMods({ cast_state: { osric: { introduced: true, knows: [], notes: [] } } }),

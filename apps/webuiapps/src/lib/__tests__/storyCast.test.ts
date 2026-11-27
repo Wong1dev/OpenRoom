@@ -5,6 +5,7 @@ import {
   applyCastUpdate,
   buildCastPrompt,
   castMemberToCharacter,
+  findAddressedMember,
   getLeadId,
   getMemberState,
   getSpeakerId,
@@ -203,5 +204,36 @@ describe('ModManager with a cast', () => {
     expect(mm.speakerId).toBeNull();
     expect(mm.speaker).toBeNull();
     expect(mm.buildStageReminder()).not.toContain('[Story Cast]');
+  });
+});
+
+describe('findAddressedMember', () => {
+  const st = { cast_state: { pell: { knows: [], notes: [], introduced: true } } };
+  const brother: CastMember = {
+    id: 'tamsin',
+    name: 'Brother Tamsin',
+    gender: 'Male',
+    role: 'monk',
+    persona: '',
+  };
+  const met = {
+    cast_state: { ...st.cast_state, tamsin: { knows: [], notes: [], introduced: true } },
+  };
+
+  it('finds a met member addressed at the start of the message', () => {
+    expect(findAddressedMember(cast, st, 'Kestrel, keep the card safe.')).toBe('kestrel');
+    expect(findAddressedMember(cast, st, '  hey pell! another cider')).toBe('pell');
+    expect(findAddressedMember(cast, st, 'Kestrel Vane: deal me in')).toBe('kestrel');
+    expect(findAddressedMember(cast, st, 'Okay, Vane?')).toBe('kestrel');
+    expect(findAddressedMember(cast, st, 'Pell')).toBe('pell');
+    expect(findAddressedMember([...cast, brother], met, 'Tamsin, a word.')).toBe('tamsin');
+  });
+
+  it('ignores names mid-sentence, titles alone, and members not met yet', () => {
+    expect(findAddressedMember(cast, st, 'Ask Kestrel about it')).toBeNull();
+    expect(findAddressedMember(cast, st, 'Kestrels are birds')).toBeNull();
+    expect(findAddressedMember(cast, st, 'Osric, over here!')).toBeNull();
+    expect(findAddressedMember([...cast, brother], met, 'Brother, a word.')).toBeNull();
+    expect(findAddressedMember(cast, st, '')).toBeNull();
   });
 });
