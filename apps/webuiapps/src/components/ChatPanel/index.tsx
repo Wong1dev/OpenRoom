@@ -778,6 +778,10 @@ const ChatPanel: React.FC<{
     return () => window.removeEventListener('mod-collection-changed', handler);
   }, []);
 
+  // Clear and Reset sit next to Settings: a stray tap must not wipe a long story,
+  // so both ask in a bar under the header first.
+  const [pendingWipe, setPendingWipe] = useState<'clear' | 'reset' | null>(null);
+
   const handleClearHistory = useCallback(async () => {
     const sp = sessionPathRef.current;
     await clearChatHistory(sp);
@@ -1520,7 +1524,7 @@ const ChatPanel: React.FC<{
               </div>
               <button
                 className={styles.iconBtn}
-                onClick={handleResetSession}
+                onClick={() => setPendingWipe('reset')}
                 title="Reset session"
                 data-testid="reset-session"
               >
@@ -1528,7 +1532,7 @@ const ChatPanel: React.FC<{
               </button>
               <button
                 className={styles.iconBtn}
-                onClick={handleClearHistory}
+                onClick={() => setPendingWipe('clear')}
                 title="Clear chat"
                 data-testid="clear-chat"
               >
@@ -1565,6 +1569,36 @@ const ChatPanel: React.FC<{
               </button>
             </div>
           </div>
+
+          {pendingWipe && (
+            <div className={styles.confirmBar} role="alertdialog" data-testid="confirm-bar">
+              <span>
+                {pendingWipe === 'clear'
+                  ? 'Clear this chat? The messages are deleted; the story stage is kept.'
+                  : 'Reset this session? Chat, memories, app data and story progress are deleted.'}
+              </span>
+              <div className={styles.confirmActions}>
+                <button
+                  className={styles.cancelBtn}
+                  onClick={() => setPendingWipe(null)}
+                  data-testid="confirm-no"
+                >
+                  Cancel
+                </button>
+                <button
+                  className={styles.dangerBtn}
+                  onClick={() => {
+                    const what = pendingWipe;
+                    setPendingWipe(null);
+                    void (what === 'clear' ? handleClearHistory() : handleResetSession());
+                  }}
+                  data-testid="confirm-yes"
+                >
+                  {pendingWipe === 'clear' ? 'Clear chat' : 'Reset session'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {modManager?.hasCast && (
             <CastBar

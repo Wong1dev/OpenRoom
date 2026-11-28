@@ -358,6 +358,35 @@ test.describe('Story cast', () => {
     await expect(messages).not.toContainText('[Kestrel Vane]');
   });
 
+  test('clearing the chat asks first; cancelling keeps the story', async ({ page }) => {
+    const io = await setup(page, {
+      mods: tavernMods(),
+      replies: [toolsReply([say('(deals a hand) Your move.')])],
+    });
+    await page.goto('/');
+    await send(page, 'Deal me in.');
+    const messages = page.locator('[data-testid="chat-messages"]');
+    await expect(messages).toContainText('Your move.');
+
+    const bar = page.locator('[data-testid="confirm-bar"]');
+    await page.locator('[data-testid="clear-chat"]').click();
+    await expect(bar).toContainText('Clear this chat?');
+    await page.locator('[data-testid="confirm-no"]').click();
+    await expect(bar).toHaveCount(0);
+    await expect(messages).toContainText('Your move.');
+
+    await page.locator('[data-testid="reset-session"]').click();
+    await expect(bar).toContainText('Reset this session?');
+    await page.locator('[data-testid="confirm-no"]').click();
+    await expect(messages).toContainText('Your move.');
+
+    await page.locator('[data-testid="clear-chat"]').click();
+    await page.locator('[data-testid="confirm-yes"]').click();
+    await expect(messages).not.toContainText('Your move.');
+    await expect(messages).toContainText('Evening, stranger.');
+    expect(io.requests).toHaveLength(1);
+  });
+
   test('the user picks who to talk to; memory and choices survive a reload', async ({ page }) => {
     const io = await setup(page, {
       mods: tavernMods({ cast_state: { osric: { introduced: true, knows: [], notes: [] } } }),
